@@ -123,8 +123,11 @@ function isImageHref(value) {
 function normalizeImageHref(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
+  if (/^data:image\//i.test(raw)) return raw;
   // External absolute URLs are allowed but never get the bridge token.
   if (/^https?:\/\//i.test(raw)) return raw;
+  // Reject other schemes (javascript:, vbscript:, ...).
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return "";
   const clean = raw.replace(/^\.\//, "");
   if (clean.startsWith("/api/file/raw") || clean.startsWith("/api/uploaded")) {
     return authedUrl(clean);

@@ -1950,7 +1950,10 @@ class SharedBridge {
       this.preReadyQueue.push({ text, attachments, options, commandId });
       return { status: "queued" };
     }
-    if (commandId) this.seenCommands.add(commandId);
+    if (commandId) {
+      if (this.seenCommands.size > 1000) this.seenCommands.clear();
+      this.seenCommands.add(commandId);
+    }
     if (this.activeTurnId || this.hasPendingTurnStart()) {
       this.turnQueue.push({ text, attachments, options });
       this.emit("status", { text: `已加入队列（${this.turnQueue.length} 条等待）` });
@@ -1964,7 +1967,10 @@ class SharedBridge {
     if (!this.preReadyQueue.length) return;
     const queue = this.preReadyQueue.splice(0);
     for (const item of queue) {
-      if (item.commandId) this.seenCommands.add(item.commandId);
+      if (item.commandId) {
+        if (this.seenCommands.size > 1000) this.seenCommands.clear();
+        this.seenCommands.add(item.commandId);
+      }
       this.prompt(item.text, item.attachments, item.options, null);
     }
   }
@@ -2212,7 +2218,10 @@ class ClaudeBridge {
     if (commandId && this.seenCommands.has(commandId)) {
       return { status: "accepted", duplicate: true };
     }
-    if (commandId) this.seenCommands.add(commandId);
+    if (commandId) {
+      if (this.seenCommands.size > 1000) this.seenCommands.clear();
+      this.seenCommands.add(commandId);
+    }
     if (this.activeTurnId || this.activeProcess) {
       this.turnQueue.push({ text, attachments, options });
       this.emit("status", { text: `已加入队列（${this.turnQueue.length} 条等待）` });

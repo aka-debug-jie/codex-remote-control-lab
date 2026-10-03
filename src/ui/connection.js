@@ -28,16 +28,17 @@ export function createConnection(store, { onThreadChange } = {}) {
   }
 
   function send(payload) {
+    const open = ws && ws.readyState === WebSocket.OPEN;
     if (COMMAND_TYPES.has(payload.type)) {
       if (!payload.commandId) payload = { ...payload, commandId: makeCommandId() };
       // Keep until the server ACKs, so a command is never lost on a drop and is
       // re-sent (server dedupes by commandId) if the ACK never arrived.
       pendingCommands.set(payload.commandId, payload);
+      if (open) ws.send(wire(payload));
+    } else if (open) {
+      ws.send(wire(payload));
     } else {
       outbox.push(payload);
-    }
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(wire(payload));
     }
   }
 
