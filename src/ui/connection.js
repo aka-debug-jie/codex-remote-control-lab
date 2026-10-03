@@ -15,14 +15,29 @@ export function createConnection(store, { onThreadChange } = {}) {
   let deltaBuffer = new Map();
   let flushHandle = null;
   const outbox = [];
+  const pendingCommands = new Map();
+  const COMMAND_TYPES = new Set(["prompt", "interrupt", "approval"]);
+
+  function makeCommandId() {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `cmd-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  function wire(payload) {
+    return JSON.stringify({ token, ...payload });
+  }
 
   function send(payload) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ token, ...payload }));
+    if (COMMAND_TYPES.has(payload.type)) {
+      if (!payload.commandId) payload = { ...payload, commandId: makeCommandId() };
+      // Keep until the server ACKs, so a command is never lost on a drop and is
+      // re-sent (server dedupes by commandId) if the ACK never arrived.
+      pendingCommands.set(payload.commandId, payload);
     } else {
-      // Queue while disconnected; flushed on the next open so a prompt or
-      // approval tapped during a brief drop is not lost.
       outbox.push(payload);
+    }
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(wire(payload));
     }
   }
 
@@ -51,6 +66,19 @@ export function createConnection(store, { onThreadChange } = {}) {
       send({ type: "resync" });
       return;
     }
+    if (event.type === "command.accepted" || event.type === "command.rejected") {
+      if (event.commandId) pendingCommands.delete(event.commandId);
+      if (event.type === "command.rejected") {
+        store.dispatch({ type: "command.rejected", commandId: event.commandId, reason: event.reason });
+      }
+      return;
+    }
+    // Adopt the authoritative thread id (e.g. a freshly created thread) so a
+    // later reconnect resumes the same thread instead of creating a new one.
+    if ((event.type === "ready" || event.type === "history.snapshot") && event.threadId && event.threadId !== threadId) {
+      threadId = event.threadId;
+      if (onThreadChange) onThreadChange(threadId);
+    }
     if (event.type !== "message.delta") {
       if (deltaBuffer.size) {
         if (flushHandle != null) cancelAnimationFrame(flushHandle);
@@ -60,14 +88,16 @@ export function createConnection(store, { onThreadChange } = {}) {
     const seq = typeof event.seq === "number" ? event.seq : null;
     if (seq != null) {
       if (event.type === "history.snapshot") {
+        if (seq < lastSeq) return; // ignore a stale snapshot
         lastSeq = seq;
         store.dispatch(event);
         return;
       }
+      if (seq <= lastSeq) return; // duplicate or replayed event
       if (seq > lastSeq + 1) {
         send({ type: "resync" });
       }
-      lastSeq = Math.max(lastSeq, seq);
+      lastSeq = seq;
     }
     if (event.type === "message.delta") {
       deltaBuffer.set(event.messageId, (deltaBuffer.get(event.messageId) || "") + (event.delta || ""));
@@ -163,14 +193,15 @@ export function createConnection(store, { onThreadChange } = {}) {
       clearReconnect();
       startHeartbeat();
       store.dispatch({ type: "connection", status: "open" });
-      if (outbox.length) {
-        const queued = outbox.splice(0);
-        for (const payload of queued) {
-          try {
-            socket.send(JSON.stringify({ token, ...payload }));
-          } catch {
-            /* ignore */
-          }
+      // Re-send everything not yet acknowledged (server dedupes by commandId),
+      // plus any non-command frames queued while offline.
+      const queued = outbox.splice(0);
+      const frames = [...pendingCommands.values(), ...queued];
+      for (const payload of frames) {
+        try {
+          socket.send(wire(payload));
+        } catch {
+          /* ignore */
         }
       }
     });
@@ -199,6 +230,7 @@ export function createConnection(store, { onThreadChange } = {}) {
     if (nextThreadId === threadId && ws && ws.readyState === WebSocket.OPEN) return;
     clearReconnect();
     outbox.length = 0; // never deliver queued frames to a different thread
+    pendingCommands.clear();
     try {
       ws && ws.close();
     } catch {
@@ -231,6 +263,21 @@ export function createConnection(store, { onThreadChange } = {}) {
     connect,
     setThread,
     send,
+    // Force a fresh socket even if the current one is still OPEN (used when the
+    // bridge is reachable but the upstream/thread is stuck).
+    reconnect() {
+      clearReconnect();
+      const stale = ws;
+      ws = null;
+      if (stale) {
+        try {
+          stale.close();
+        } catch {
+          /* ignore */
+        }
+      }
+      connect(threadId);
+    },
     close() {
       manualClose = true;
       clearReconnect();

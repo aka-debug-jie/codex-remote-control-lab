@@ -34,7 +34,7 @@ import {
 } from "lucide-react";
 import { createStore, runStateText } from "./store.js";
 import { createConnection } from "./connection.js";
-import { api, initialThread, token } from "./api.js";
+import { api, initialThread, token, authedUrl } from "./api.js";
 import { loadCachedMessages, saveCachedMessages, loadScroll, saveScroll } from "./cache.js";
 import { renderMarkdown, highlightCode } from "./markdown.js";
 import {
@@ -107,23 +107,22 @@ function titleForThread(thread) {
   return thread?.name || thread?.title || thread?.preview || thread?.id || "会话";
 }
 
-// Split a streaming message at the last stable block boundary so only the tail
-// block is re-parsed on each delta (closed blocks keep their HTML).
+// Split a streaming message at the last stable block boundary (a blank line
+// outside a code fence) so only the tail block is re-parsed on each delta.
 function incrementalSplit(text) {
   if (!text) return 0;
-  let last = 0;
-  const re = /\n[ \t]*\n/g;
-  let match;
-  while ((match = re.exec(text))) last = match.index + match[0].length;
-  if (last === 0) return 0;
-  const before = text.slice(0, last);
-  const fencesBefore = (before.match(/^```/gm) || []).length;
-  if (fencesBefore % 2 === 1) {
-    const open = before.lastIndexOf("```");
-    const prev = text.lastIndexOf("\n\n", Math.max(0, open - 1));
-    return prev > 0 ? prev + 2 : 0;
+  const lines = text.split("\n");
+  let offset = 0;
+  let inFence = false;
+  let safe = 0;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const isFence = /^```/.test(trimmed);
+    if (isFence) inFence = !inFence;
+    offset += line.length + 1;
+    if (!inFence && !isFence && trimmed === "") safe = offset;
   }
-  return last;
+  return safe;
 }
 
 const Markdown = React.memo(function Markdown({ text, streaming }) {
@@ -277,7 +276,7 @@ const MessageRow = React.memo(function MessageRow({ message, active, onEdit, onR
       {attachments ? (
         <div className="entry-gallery">
           {attachments.items.map((a, i) => (
-            <img key={i} src={a.url} alt={a.name} loading="lazy" />
+            <img key={i} src={authedUrl(a.url) || a.url} alt={a.name} loading="lazy" />
           ))}
         </div>
       ) : null}
@@ -389,6 +388,7 @@ function Conversation({ onDecision, onEdit, onRetry, children }) {
   const threadId = useStoreSelector((s) => s.meta.threadId);
   const logRef = useRef(null);
   const pinnedRef = useRef(true);
+  const restoredRef = useRef(null);
   const scrollSaveRef = useRef(null);
   const [showPill, setShowPill] = useState(false);
   const [query, setQuery] = useState("");
@@ -415,20 +415,27 @@ function Conversation({ onDecision, onEdit, onRetry, children }) {
     if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
-  // Restore per-thread scroll position when switching threads.
+  // Restore per-thread scroll position once messages are available (0 is a
+  // valid saved position). Runs once per thread.
   useEffect(() => {
     const el = logRef.current;
     if (!el) return;
+    if (!messages.length) {
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    if (restoredRef.current === threadId) return;
     const saved = loadScroll(threadId);
-    if (saved != null && saved > 0) {
-      el.scrollTop = saved;
+    if (saved != null && Number.isFinite(saved)) {
+      el.scrollTop = Math.max(0, saved);
       pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 72;
     } else {
       el.scrollTop = el.scrollHeight;
       pinnedRef.current = true;
     }
+    restoredRef.current = threadId;
     setShowPill(false);
-  }, [threadId]);
+  }, [threadId, messages.length]);
 
   // Cache the conversation for offline relaunch (debounced).
   useEffect(() => {
@@ -1040,6 +1047,16 @@ export function App() {
     }
   }, [meta.threadId]);
 
+  // Follow the authoritative thread id when the server assigns/changes it
+  // (e.g. a new thread), without fighting an in-progress user selection.
+  const adoptedThreadRef = useRef(meta.threadId);
+  useEffect(() => {
+    if (meta.threadId && meta.threadId !== adoptedThreadRef.current) {
+      adoptedThreadRef.current = meta.threadId;
+      setSelectedThread(meta.threadId);
+    }
+  }, [meta.threadId]);
+
   // body classes for CSS-driven layout
   useEffect(() => {
     document.body.classList.toggle("show-sidebar", sidebarOpen);
@@ -1195,7 +1212,7 @@ export function App() {
             <p id="meta">{runStateText[run.state] || run.label}</p>
           </div>
           <div className="title-actions">
-            <button id="connect" type="button" className="icon-button" title="重新连接" aria-label="重新连接" onClick={() => connection.connect(selectedThread)}>
+            <button id="connect" type="button" className="icon-button" title="重新连接" aria-label="重新连接" onClick={() => connection.reconnect()}>
               <RefreshCw size={16} strokeWidth={1.9} />
             </button>
             <button type="button" className="icon-button" id="menuButton" title="打开/关闭右侧面板" aria-label="打开/关闭右侧面板" onClick={() => setPanelOpen((v) => !v)}>

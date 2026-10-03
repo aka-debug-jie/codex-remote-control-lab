@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { FileText, FolderOpen, GitBranch, Globe2, TerminalSquare, X } from "lucide-react";
-import { api } from "./api.js";
+import { api, authedUrl } from "./api.js";
 import { themeOptions } from "./constants.js";
 
 const TABS = [
@@ -205,7 +205,7 @@ export const Panels = React.memo(function Panels({ open, activePanel, toolView, 
               </button>
             </div>
             {preview.kind === "image" || preview.url ? (
-              <img src={preview.url} alt={preview.path || "preview"} />
+              <img src={authedUrl(preview.url) || preview.url} alt={preview.path || "preview"} />
             ) : (
               <pre>{preview.text || ""}</pre>
             )}

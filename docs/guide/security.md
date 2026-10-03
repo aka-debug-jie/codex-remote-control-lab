@@ -6,8 +6,10 @@ This project is intentionally local-first.
 
 - The Codex app-server examples bind to `127.0.0.1`.
 - The phone bridge is the only LAN-facing server.
-- Page, API, and WebSocket bridge requests require the same token.
-- `.phone-token`, `.uploads/`, `.codex-home*/`, logs, and session databases stay out of Git.
+- Token-protected routes: all `/api/*` except `/api/info` (minimal, non-sensitive fields only), and the `/bridge` WebSocket. The static HTML/CSS/JS shell is public and holds no data by itself.
+- The bridge token travels in the URL query (`?token=`), so it is only attached to **same-origin** URLs; image/asset URLs are never given credentials on a foreign origin.
+- Tokenless debug mode (`PHONE_DEBUG_NO_TOKEN=1`) forces the bind to `127.0.0.1` unless `PHONE_DEBUG_BIND=lan` is set explicitly.
+- `.phone-token`, `.env*`, `.uploads/`, `.codex-home*/`, logs, and session databases stay out of Git.
 - Startup notification credentials and tokenized URL messages should stay in private/protected notification accounts, topics, or channels.
 
 ## Do Not Do This

@@ -15,10 +15,33 @@ if (token) {
   }
 }
 
+function parseSameOrigin(value) {
+  try {
+    const url = new URL(value, location.href);
+    if (url.origin !== location.origin) return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+// For fetch(): same-origin path+search with token. Never attaches credentials
+// to a foreign URL.
 export function withToken(url) {
-  const target = new URL(url, location.href);
+  const target = parseSameOrigin(url);
+  if (!target) return url;
   if (token) target.searchParams.set("token", token);
   return target.pathname + target.search;
+}
+
+// Absolute same-origin URL with token, for <img>/assets. Returns "" for
+// anything not same-origin, so a credentialed cross-origin URL is never
+// produced (this is the root cause of the token-leak vector).
+export function authedUrl(value) {
+  const target = parseSameOrigin(value);
+  if (!target) return "";
+  if (token) target.searchParams.set("token", token);
+  return target.href;
 }
 
 export async function apiGet(path) {

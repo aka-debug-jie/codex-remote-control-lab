@@ -15,3 +15,9 @@ tmp/
 
 .env.*
 !.env.example
+
+# local credentials / session data
+.phone-token.bak
+*.bak
+auth.json
+**/.codex-home*/sessions/**

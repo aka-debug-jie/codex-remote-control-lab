@@ -46,12 +46,16 @@ function renderDocument() {
 `;
 }
 
+const checkOutputDir = path.join(repoRoot, "node_modules/.cache/codex-remote-control-lab");
+const bundleOutfile = checkOnly ? path.join(checkOutputDir, "main.check.js") : bundlePath;
+if (checkOnly) await fs.mkdir(checkOutputDir, { recursive: true });
+
 await esbuild.build({
   entryPoints: [entryPath],
   bundle: true,
   format: "iife",
   target: ["es2020"],
-  outfile: bundlePath,
+  outfile: bundleOutfile,
   jsx: "automatic",
   loader: { ".jsx": "jsx" },
   define: { "process.env.NODE_ENV": '"production"' },
@@ -62,12 +66,15 @@ await esbuild.build({
 
 const html = renderDocument();
 if (checkOnly) {
+  // Verify the bundle compiles and index.html is current WITHOUT rewriting the
+  // tracked build artifact.
   const current = await fs.readFile(outputPath, "utf8");
   if (current !== html) {
     console.error("public/index.html is out of date. Run npm run build:ui.");
     process.exit(1);
   }
-  console.log("UI bundle built and index.html is current.");
+  await fs.rm(bundleOutfile, { force: true });
+  console.log("UI bundle compiles and index.html is current (no files written).");
 } else {
   await fs.writeFile(outputPath, html, "utf8");
   console.log(`Bundled src/ui -> ${path.relative(repoRoot, bundlePath)} and generated ${path.relative(repoRoot, outputPath)}`);

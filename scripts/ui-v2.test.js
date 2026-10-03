@@ -408,6 +408,37 @@ test("retry on a user message re-sends it; edit fills the composer", async (t) =
   assert.equal(await page.inputValue("#prompt"), "原始提问内容");
 });
 
+test("commands carry a commandId and stop resending after ACK", async (t) => {
+  const { page } = await boot(t, {
+    ws: {
+      defaultReadyPayload: {
+        type: "ready",
+        threadId: "thread-v2",
+        model: "gpt-6.1-sol",
+        clients: 1,
+        workdir: root,
+        run: { state: "ready", label: "空闲" },
+        history: [{ type: "user", text: "ACK 测试内容" }],
+      },
+    },
+  });
+  await page.getByText("ACK 测试内容").first().waitFor();
+  await page.evaluate(() => window.__closeMockSockets());
+  await page.locator('.entry.user button[aria-label="重试"]').first().click();
+  await page.evaluate(() => document.querySelector("#connect")?.click());
+  await page.waitForFunction(() => (window.__sentFrames || []).some((f) => f.type === "prompt" && f.commandId), null, { timeout: 8000 });
+  const cmdId = await page.evaluate(() => (window.__sentFrames.find((f) => f.type === "prompt") || {}).commandId);
+  assert.ok(cmdId, "prompt carries commandId");
+  await page.evaluate((id) => window.__dispatchServerMessage({ type: "command.accepted", commandId: id }), cmdId);
+  await page.waitForTimeout(200);
+  const before = await page.evaluate(() => window.__sentFrames.filter((f) => f.type === "prompt").length);
+  await page.evaluate(() => window.__closeMockSockets());
+  await page.evaluate(() => document.querySelector("#connect")?.click());
+  await page.waitForTimeout(700);
+  const after = await page.evaluate(() => window.__sentFrames.filter((f) => f.type === "prompt").length);
+  assert.equal(after, before, "ACKed command must not be resent");
+});
+
 test("remembers the last thread and reconnects to it after relaunch", async (t) => {
   const ready = {
     type: "ready",
@@ -497,4 +528,116 @@ test("composer grows with multi-line input", async (t) => {
   await page.waitForTimeout(150);
   const after = await page.locator("#prompt").evaluate((el) => el.getBoundingClientRect().height);
   assert.ok(after > before, `expected growth: ${after} > ${before}`);
+});
+
+test("malicious image URLs never carry the token to a foreign origin", async (t) => {
+  const { page } = await boot(t, {
+    ws: {
+      defaultReadyPayload: {
+        type: "ready",
+        threadId: "thread-v2",
+        model: "gpt-6.1-sol",
+        clients: 1,
+        workdir: root,
+        run: { state: "ready", label: "空闲" },
+        history: [
+          { type: "assistant", text: "![x](/api/file/raw/../../..//example.invalid/canary.png)\n\n![y](https://evil.invalid/pic.png)" },
+        ],
+      },
+    },
+  });
+  await page.waitForSelector(".entry.assistant img");
+  const srcs = await page.locator(".entry.assistant img").evaluateAll((imgs) => imgs.map((i) => i.getAttribute("src")));
+  const pageOrigin = new URL(page.url()).origin;
+  for (const src of srcs) {
+    const u = new URL(src, page.url());
+    // Invariant: the token may only ever appear on a same-origin URL.
+    if (/[?&]token=/.test(src)) assert.equal(u.origin, pageOrigin, `credentials leaked to ${src}`);
+  }
+  // The protocol-relative path trick must not resolve to a foreign host.
+  const tricky = srcs.find((s) => s.includes("example.invalid"));
+  assert.ok(tricky, "expected the tricky src to render");
+  assert.equal(new URL(tricky, page.url()).origin, pageOrigin);
+});
+
+test("snapshot restores in-flight message, tool, approvals and usage", async (t) => {
+  const { page } = await boot(t);
+  await page.evaluate(() => {
+    window.__dispatchServerMessage({
+      type: "history.snapshot",
+      threadId: "thread-v2",
+      seq: 5,
+      messages: [{ type: "assistant", text: "历史回复" }],
+      activeMessage: { messageId: "m-live", role: "assistant", text: "正在输出中" },
+      activeTools: [{ toolCallId: "t1", kind: "command", name: "echo", input: { command: "echo hi" }, status: "running" }],
+      approvals: [{ approvalId: 9, request: { id: 9, method: "item/commandExecution/requestApproval", params: {} } }],
+      usage: { total: { totalTokens: 100, inputTokens: 80, outputTokens: 20 } },
+      run: { state: "approval", label: "等待审批" },
+    });
+  });
+  await page.waitForTimeout(200);
+  assert.equal(await page.locator(".entry.assistant").count(), 2);
+  assert.equal(await page.locator(".entry.tool .tool-card").count(), 1);
+  assert.equal(await page.locator(".approval").count(), 1);
+  assert.match(await page.locator(".usage-badge").innerText(), /↑/);
+});
+
+test("adopts the server thread id so reconnect resumes it", async (t) => {
+  const { page } = await boot(t, {
+    ws: {
+      defaultReadyPayload: {
+        type: "ready",
+        threadId: "new-A",
+        model: "gpt-6.1-sol",
+        clients: 1,
+        workdir: root,
+        run: { state: "ready", label: "空闲" },
+        history: [],
+      },
+    },
+  });
+  await page.waitForFunction(() => document.querySelector("#runState")?.dataset.state === "ready");
+  await page.evaluate(() => window.__closeMockSockets());
+  await page.evaluate(() => document.querySelector("#connect")?.click());
+  await page.waitForTimeout(400);
+  const urls = await page.evaluate(() => window.__mockSockets.map((s) => s.url));
+  assert.ok(urls.some((u) => /thread=new-A/.test(u)), JSON.stringify(urls));
+});
+
+test("markdown preserves code content, link queries, and c++ fences", async (t) => {
+  const text = [
+    "```js",
+    "::selection{background: yellow;}",
+    "```",
+    "",
+    "[link](https://example.com/?a=1&lang=zh)",
+    "",
+    "see __init__.py",
+    "",
+    "```c++",
+    "int main(){}",
+    "```",
+  ].join("\n");
+  const { page } = await boot(t, {
+    ws: {
+      defaultReadyPayload: {
+        type: "ready",
+        threadId: "thread-v2",
+        model: "gpt-6.1-sol",
+        clients: 1,
+        workdir: root,
+        run: { state: "ready", label: "空闲" },
+        history: [{ type: "assistant", text }],
+      },
+    },
+  });
+  await page.waitForSelector(".entry.assistant");
+  const body = page.locator(".entry.assistant .entry-body").first();
+  const preText = await body.locator("pre").first().innerText();
+  assert.match(preText, /::selection/);
+  const href = await body.locator("a").first().getAttribute("href");
+  assert.match(href, /lang=zh/);
+  assert.doesNotMatch(href, /&amp;/);
+  assert.equal(await body.locator('pre[data-language="c++"]').count(), 1);
+  assert.match(await body.innerText(), /__init__\.py/);
 });

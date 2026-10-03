@@ -133,3 +133,58 @@ test("firstLine truncates and keeps the first line", () => {
   assert.equal(firstLine("/bin/bash -lc \"echo hi\"\nsecond"), "/bin/bash -lc \"echo hi\"");
   assert.ok(firstLine("x".repeat(300)).length <= 120);
 });
+
+test("codex: reasoning summaryTextDelta and summary[] are handled", () => {
+  const state = createCodexState();
+  state.turnId = "t";
+  const events = applyAll(normalizeCodexMessage, state, [
+    { method: "item/reasoning/summaryTextDelta", params: { itemId: "r1", delta: "思考" } },
+    { method: "item/completed", params: { item: { type: "reasoning", id: "r1", summary: ["总结", "文本"] } } },
+  ]);
+  assert.equal(events[0].type, "reasoning.started");
+  assert.equal(events.find((e) => e.type === "reasoning.delta").delta, "思考");
+  assert.equal(events.at(-1).type, "reasoning.finished");
+  assert.equal(events.at(-1).text, "总结文本");
+});
+
+test("codex: fileChange changes[].diff is joined", () => {
+  const state = createCodexState();
+  const events = normalizeCodexMessage(
+    { method: "item/completed", params: { item: { type: "fileChange", id: "fc", status: "completed", changes: [{ diff: "+A" }, { diff: "+B" }] } } },
+    state,
+  );
+  assert.equal(events[0].diff, "+A\n+B");
+});
+
+test("codex: retryable error is not terminal", () => {
+  const state = createCodexState();
+  const events = normalizeCodexMessage({ method: "error", params: { willRetry: true, error: { message: "Reconnecting..." } } }, state);
+  assert.equal(events.some((e) => e.type === "run.error"), false);
+  assert.ok(events.some((e) => e.type === "run.state" && e.state === "running"));
+});
+
+test("codex: failed turn maps to failed run", () => {
+  const state = createCodexState();
+  const events = normalizeCodexMessage({ method: "turn/completed", params: { turnId: "t", turn: { status: "failed" } } }, state);
+  assert.equal(events[0].type, "run.finished");
+  assert.equal(events[0].status, "failed");
+});
+
+test("claude: thinking block and array tool_result content", () => {
+  const state = createClaudeState();
+  const events = applyAll(normalizeClaudeMessage, state, [
+    { type: "stream_event", event: { type: "content_block_start", content_block: { type: "thinking" } } },
+    { type: "stream_event", event: { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "让我想想" } } },
+    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu", content: [{ type: "text", text: "输出A" }, { type: "text", text: "输出B" }] }] } },
+  ]);
+  assert.equal(events[0].type, "reasoning.started");
+  assert.equal(events.find((e) => e.type === "reasoning.delta").delta, "让我想想");
+  const tool = events.find((e) => e.type === "tool.finished");
+  assert.equal(tool.output, "输出A\n输出B");
+});
+
+test("claude: is_error result maps to failed run", () => {
+  const state = createClaudeState();
+  const events = normalizeClaudeMessage({ type: "result", is_error: true }, state);
+  assert.equal(events[0].status, "failed");
+});

@@ -5,7 +5,7 @@
 <p align="center">
   <a href="README.ja.md">日本語</a> ·
   <a href="https://sunwood-ai-labs.github.io/codex-remote-control-lab/">Docs</a> ·
-  <a href="https://github.com/Sunwood-ai-labs/codex-remote-control-lab">GitHub</a>
+  <a href="https://github.com/aka-debug-jie/codex-remote-control-lab">GitHub</a>
 </p>
 
 <p align="center">
@@ -34,7 +34,7 @@ It is a local-first experiment for OpenAI Codex CLI `remote-control` and `app-se
 ## 🚀 Quick Start
 
 ```bash
-git clone https://github.com/Sunwood-ai-labs/codex-remote-control-lab.git
+git clone https://github.com/aka-debug-jie/codex-remote-control-lab.git
 cd codex-remote-control-lab
 npm ci
 npm run phone
@@ -128,13 +128,13 @@ See [.env.example](.env.example) for a public-safe template.
 
 `CODEX_APP_SERVER_SOCK` or `CODEX_APP_SERVER_URL` makes the bridge attach to an existing headless app-server instead of starting a new one. For live sync with Codex Desktop, use this with a Desktop Remote Connection that points at the same headless app-server. The normal local conversation view in Codex Desktop uses a private `stdio` app-server, so there is no public external route for a bridge to inject live UI updates into that local view.
 
-History sync is enabled by default. After a web turn completes, the bridge warms the app-server history with `thread/read` and a scan-backed `thread/list`, and `/api/threads` also avoids state-DB-only listing. This helps Codex Desktop discover the updated session after reopening or refreshing the thread. It does not inject live updates into an already-open normal Desktop conversation view. Set `CODEX_HISTORY_SYNC=0` to disable the extra history refresh calls.
+History sync is enabled by default. After a web turn completes, the bridge warms the app-server history with `thread/read` and a scan-backed `thread/list`, and `/api/threads` lists from the state DB (`useStateDbOnly: true`) for speed. This helps Codex Desktop discover the updated session after reopening or refreshing the thread. It does not inject live updates into an already-open normal Desktop conversation view. Set `CODEX_HISTORY_SYNC=0` to disable the extra history refresh calls.
 
 `npm run phone:claude` sets `PHONE_AGENT_PROVIDER=claude`, starts per-turn `claude -p --output-format stream-json` processes, and reads same-workdir Claude Code JSONL sessions for the sidebar. Codex-only app-server plugin lookup, live approval callbacks, and history sync stay disabled in Claude mode.
 
 Codex rate-limit display is optional. Set `PHONE_CODEX_RATE_LIMIT_REFRESH_COMMAND="node scripts/read-desktop-rate-limits.js"` to read local Codex auth, call the usage endpoint, normalize remaining percentage/reset metadata, and cache only the display snapshot in `.phone-rate-limits.json`.
 
-Notifications are opt-in. `PHONE_NTFY_TOPIC` sends bridge events to an ntfy topic, `PHONE_PUSHOVER_TOKEN` plus `PHONE_PUSHOVER_USER` sends them through Pushover, and `PHONE_DISCORD_WEBHOOK_URL` posts them to Discord. Startup notifications include the ready URLs, and task notifications fire on completion, failure, and approval requests. `npm run phone` loads local `.env` values before reading these variables. `PHONE_NTFY_SERVER` defaults to `https://ntfy.sh` and must use HTTPS. Notification bodies can include tokenized bridge URLs, so use a private/protected topic, account, or channel and keep these values in local environment variables.
+Notifications are opt-in. `PHONE_NTFY_TOPIC` sends bridge events to an ntfy topic, `PHONE_PUSHOVER_TOKEN` plus `PHONE_PUSHOVER_USER` sends them through Pushover, and `PHONE_DISCORD_WEBHOOK_URL` posts them to Discord. Startup notifications include the ready URLs, and task notifications fire on completion, failure, and approval requests. `npm run phone` loads local `.env` values before reading these variables. `PHONE_NTFY_SERVER` defaults to `https://ntfy.sh` and must use HTTPS. Notification bodies use token-free bridge URLs, and task notifications link to the native app via `codexapp://open?thread=...` (override with `PHONE_APP_SCHEME`, or set it empty to link to the plain bridge URL). Keep the notification channel private and trusted anyway.
 
 Tokenless debug mode intentionally skips startup notifications. If you manually send a `PHONE_DEBUG_NO_TOKEN=1` plus `PHONE_DEBUG_BIND=lan` URL to Discord, treat that channel as private and trusted: anyone who can open the URL on the LAN can operate the bridge without a token.
 

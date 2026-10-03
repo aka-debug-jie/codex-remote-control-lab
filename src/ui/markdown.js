@@ -1,5 +1,5 @@
 // Markdown renderer ported from the original vanilla client.
-import { withToken } from "./api.js";
+import { authedUrl } from "./api.js";
 
 export function escapeHtml(value) {
   return String(value ?? "")
@@ -11,10 +11,20 @@ export function escapeHtml(value) {
 }
 
 export function stripUiDirectives(text) {
-  return String(text || "")
-    .replace(/(?:^|\n)::[a-z0-9-]+\{[^\n]*\}(?=\n|$)/gi, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  // Drop directive-only lines but never touch fenced code content.
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+  let inFence = false;
+  const out = [];
+  for (const line of lines) {
+    if (/^```/.test(line.trim())) {
+      inFence = !inFence;
+      out.push(line);
+      continue;
+    }
+    if (!inFence && /^::[a-z0-9-]+\{[^\n]*\}$/i.test(line.trim())) continue;
+    out.push(line);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 // --- lightweight, dependency-free syntax highlighting ---------------------
@@ -111,19 +121,26 @@ function isImageHref(value) {
 }
 
 function normalizeImageHref(value) {
-  if (/^https?:\/\//i.test(value)) return value;
-  const clean = String(value || "").replace(/^\.\//, "");
-  if (clean.startsWith("/api/file/raw") || clean.startsWith("/api/uploaded")) return withToken(clean);
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  // External absolute URLs are allowed but never get the bridge token.
+  if (/^https?:\/\//i.test(raw)) return raw;
+  const clean = raw.replace(/^\.\//, "");
+  if (clean.startsWith("/api/file/raw") || clean.startsWith("/api/uploaded")) {
+    return authedUrl(clean);
+  }
   const localPath = clean.replace(/[?#].*$/, "");
   const repoImage = localPath.match(/(?:^|[/\\])(docs[/\\](?:assets|public)[/\\].+\.(?:png|jpe?g|gif|webp|svg))$/i);
-  if (repoImage) return withToken(`/api/file/raw?path=${encodeURIComponent(repoImage[1].replace(/\\/g, "/"))}`);
+  if (repoImage) {
+    return authedUrl(`/api/file/raw?path=${encodeURIComponent(repoImage[1].replace(/\\/g, "/"))}`);
+  }
   if (/^[^?#]+\/[^?#]+\.(png|jpe?g|gif|webp|svg)(?:[?#].*)?$/i.test(clean)) {
-    return withToken(`/api/file/raw?path=${encodeURIComponent(localPath)}`);
+    return authedUrl(`/api/file/raw?path=${encodeURIComponent(localPath)}`);
   }
   if (/^[^/\\]+$/.test(clean) && isImageHref(clean)) {
-    return withToken(`/api/file/raw?path=${encodeURIComponent(`docs/assets/${clean}`)}`);
+    return authedUrl(`/api/file/raw?path=${encodeURIComponent(`docs/assets/${clean}`)}`);
   }
-  return value;
+  return raw;
 }
 
 const ALLOWED_TAGS = new Set([
@@ -183,12 +200,15 @@ function isHtmlBlockStart(line) {
 function renderInlineMarkdown(text) {
   const codeTokens = [];
   const imageTokens = [];
+  const linkTokens = [];
   let source = String(text).replace(/`([^`]+)`/g, (_, code) => {
     const token = `\u0000CODE${codeTokens.length}\u0000`;
     codeTokens.push(escapeHtml(code));
     return token;
   });
 
+  // Extract images and links from the RAW source (before escaping) so `&` in
+  // query strings is not double-escaped and token placeholders stay intact.
   source = source.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (match, label, href) => {
     if (!isImageHref(href)) return match;
     const token = `\u0000IMAGE${imageTokens.length}\u0000`;
@@ -196,24 +216,27 @@ function renderInlineMarkdown(text) {
     return token;
   });
 
+  source = source.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, href) => {
+    if (isImageHref(href)) {
+      const token = `\u0000IMAGE${imageTokens.length}\u0000`;
+      imageTokens.push({ name: label, url: normalizeImageHref(href) });
+      return token;
+    }
+    const safeHref = sanitizeHref(href);
+    const inner = escapeHtml(label);
+    const html = safeHref ? `<a href="${escapeHtml(safeHref)}" target="_blank" rel="noreferrer">${inner}</a>` : inner;
+    const token = `\u0000LINK${linkTokens.length}\u0000`;
+    linkTokens.push(html);
+    return token;
+  });
+
   source = escapeHtml(source)
-    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, href) => {
-      if (isImageHref(href)) {
-        const token = `\u0000IMAGE${imageTokens.length}\u0000`;
-        imageTokens.push({ name: label, url: normalizeImageHref(href) });
-        return token;
-      }
-      const safeHref = sanitizeHref(href);
-      if (!safeHref) return label;
-      return `<a href="${escapeHtml(safeHref)}" target="_blank" rel="noreferrer">${label}</a>`;
-    })
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
-    .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
-    .replace(/(^|[\s(])_([^_\n]+)_/g, "$1<em>$2</em>");
+    .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
 
   return source
     .replace(/\u0000CODE(\d+)\u0000/g, (_, index) => `<code>${codeTokens[Number(index)] || ""}</code>`)
+    .replace(/\u0000LINK(\d+)\u0000/g, (_, index) => linkTokens[Number(index)] || "")
     .replace(/\u0000IMAGE(\d+)\u0000/g, (_, index) => {
       const image = imageTokens[Number(index)];
       if (!image) return "";
@@ -246,7 +269,7 @@ export function renderMarkdown(text, options = {}) {
       continue;
     }
 
-    const fence = line.match(/^```\s*([a-z0-9_-]+)?\s*$/i);
+    const fence = line.match(/^```\s*([a-zA-Z0-9_+#.-]+)?\s*$/);
     if (fence) {
       const code = [];
       index += 1;

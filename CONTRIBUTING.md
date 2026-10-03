@@ -12,9 +12,16 @@ Thanks for helping make this lab easier to reuse.
 
 ```bash
 npm ci
-npm run check
+npx playwright install chromium   # required for the UI tests (browser binary)
+npm run build:ui                  # bundle src/ui -> public/main.js
+npm run check                     # build check (non-destructive) + syntax checks
+npm test                          # node --test scripts/*.test.js
 npm run docs:build
 ```
+
+The browser client is React source under `src/ui/` and is bundled into
+`public/main.js` by `npm run build:ui` (esbuild). Edit `src/ui/`, not the
+generated `public/main.js` / `public/index.html`.
 
 For manual bridge testing:
 

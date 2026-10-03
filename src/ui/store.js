@@ -117,9 +117,28 @@ export function applyEvent(state, event) {
   switch (event.type) {
     case "history.snapshot": {
       const messages = (event.messages || []).map(messageFromHistory);
+      if (event.activeMessage && event.activeMessage.text) {
+        messages.push({
+          id: event.activeMessage.messageId,
+          role: "assistant",
+          status: "streaming",
+          parts: [{ type: "text", text: event.activeMessage.text, raw: event.activeMessage.text }],
+        });
+      }
+      for (const tool of event.activeTools || []) {
+        messages.push({
+          id: `tool:${tool.toolCallId}`,
+          role: "tool",
+          status: "streaming",
+          parts: [{ type: "tool", ...tool, status: "running" }],
+        });
+      }
       next.messages = messages;
-      next.activeAssistantId = null;
-      next.approvals = [];
+      next.activeAssistantId = event.activeMessage ? event.activeMessage.messageId : null;
+      next.approvals = Array.isArray(event.approvals)
+        ? event.approvals.map((a) => ({ approvalId: a.approvalId, request: a.request }))
+        : [];
+      if (event.usage) next.usage = event.usage;
       if (typeof event.seq === "number") next.seq = event.seq;
       if (event.threadId) next.meta = { ...next.meta, threadId: event.threadId };
       if (event.run) next.run = event.run;
@@ -154,15 +173,21 @@ export function applyEvent(state, event) {
     case "run.started":
       next.run = { state: "running", label: runStateText.running, turnId: event.turnId || null };
       return next;
-    case "run.finished":
+    case "run.finished": {
+      const interrupted = event.status === "interrupted";
+      const failed = event.status === "failed";
       next.run = {
-        state: event.status === "interrupted" ? "interrupted" : "done",
-        label: event.status === "interrupted" ? runStateText.interrupted : runStateText.done,
+        state: interrupted ? "interrupted" : failed ? "error" : "done",
+        label: interrupted ? runStateText.interrupted : failed ? runStateText.error : runStateText.done,
         turnId: event.turnId || null,
         durationMs: event.durationMs ?? null,
       };
       next.activeAssistantId = null;
+      if (failed) {
+        next.notices = [...next.notices, { id: `rf:${event.turnId || next.seq}`, kind: "error", text: "任务失败" }].slice(-MAX_NOTICES);
+      }
       return next;
+    }
     case "usage.updated":
       next.usage = { total: event.total || null, last: event.last || null };
       return next;
@@ -271,7 +296,14 @@ export function applyEvent(state, event) {
     }
     case "error": {
       const text = event.text || event.message || "错误";
-      next.notices = [...next.notices, { id: `e:${next.seq}`, kind: "error", text }].slice(-MAX_NOTICES);
+      next.notices = [...next.notices, { id: `e:${next.seq}`, text, kind: "error" }].slice(-MAX_NOTICES);
+      return next;
+    }
+    case "command.rejected": {
+      next.notices = [
+        ...next.notices,
+        { id: `cr:${event.commandId || next.seq}`, kind: "error", text: `发送未被接受：${event.reason || "未知原因"}` },
+      ].slice(-MAX_NOTICES);
       return next;
     }
     case "runState": {

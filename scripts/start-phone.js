@@ -17,6 +17,7 @@ const {
   normalizeCodexMessage,
   normalizeClaudeMessage,
   clampOutput,
+  fileChangeDiff,
 } = require("./agent-events");
 
 const root = path.resolve(__dirname, "..");
@@ -93,7 +94,15 @@ const debugBind = (process.env.PHONE_DEBUG_BIND || "").trim().toLowerCase();
 const debugLan = debugNoToken && debugBind === "lan";
 const authMode = debugNoToken ? "debug-no-token" : "token";
 const tokenRequired = authMode === "token";
-const listenHost = (process.env.PHONE_BIND_HOST || "").trim() || (tokenRequired || debugLan ? "0.0.0.0" : "127.0.0.1");
+const requestedListenHost = (process.env.PHONE_BIND_HOST || "").trim() || (tokenRequired || debugLan ? "0.0.0.0" : "127.0.0.1");
+const isLoopbackHost = (host) => host === "127.0.0.1" || host === "::1" || host === "localhost";
+let listenHost = requestedListenHost;
+if (!tokenRequired && !debugLan && !isLoopbackHost(listenHost)) {
+  // Tokenless debug mode must never be exposed on a routable interface unless
+  // PHONE_DEBUG_BIND=lan explicitly opts in.
+  console.warn(`[security] tokenless debug mode cannot bind to ${listenHost}; forcing 127.0.0.1`);
+  listenHost = "127.0.0.1";
+}
 const tokenPath = path.join(root, ".phone-token");
 const rateLimitCacheTtlMs = positiveNumber(process.env.PHONE_RATE_LIMIT_CACHE_TTL_MS, 5 * 60 * 1000);
 const rateLimitRefreshTimeoutMs = positiveNumber(process.env.PHONE_RATE_LIMIT_REFRESH_TIMEOUT_MS, 6000);
@@ -1164,16 +1173,30 @@ function sandboxPolicyForMode(mode) {
   };
 }
 
+function requestUrl(req) {
+  try {
+    return new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  } catch {
+    return null;
+  }
+}
+
 function serveStatic(req, res) {
-  const requestPath = new URL(req.url, `http://${req.headers.host}`).pathname;
-  const file = requestPath === "/" ? "index.html" : requestPath.slice(1);
-  const target = path.join(root, "public", file);
-  if (!target.startsWith(path.join(root, "public")) || !fs.existsSync(target)) {
-    res.writeHead(404);
-    res.end("Not found");
+  const parsed = requestUrl(req);
+  if (!parsed) {
+    res.writeHead(400);
+    res.end("Bad request");
     return;
   }
-  const type = staticMimeTypes.get(path.extname(target).toLowerCase()) || "application/octet-stream";
+  const requestPath = parsed.pathname;
+  const file = requestPath === "/" ? "index.html" : requestPath.slice(1);
+  const publicRoot = path.join(root, "public");
+  const target = path.join(publicRoot, file);
+  if (!target.startsWith(`${publicRoot}${path.sep}`) && target !== publicRoot) {
+    res.writeHead(403);
+    res.end("Forbidden");
+    return;
+  }
   let stat;
   try {
     stat = fs.statSync(target);
@@ -1182,6 +1205,14 @@ function serveStatic(req, res) {
     res.end("Not found");
     return;
   }
+  // Only serve regular files — a directory (e.g. /assets/) must not open a
+  // read stream that emits an unhandled EISDIR and crashes the process.
+  if (!stat.isFile()) {
+    res.writeHead(404);
+    res.end("Not found");
+    return;
+  }
+  const type = staticMimeTypes.get(path.extname(target).toLowerCase()) || "application/octet-stream";
   // Revalidate on every load (no-cache) but let unchanged assets 304 so the
   // phone does not re-download the JS/CSS bundle over the network each open.
   const etag = `W/"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
@@ -1191,7 +1222,12 @@ function serveStatic(req, res) {
     return;
   }
   res.writeHead(200, { "content-type": `${type}; charset=utf-8`, "cache-control": "no-cache", etag });
-  fs.createReadStream(target).pipe(res);
+  const stream = fs.createReadStream(target);
+  stream.on("error", () => {
+    if (!res.headersSent) res.writeHead(500);
+    res.end();
+  });
+  stream.pipe(res);
 }
 
 function stripUiDirectives(text) {
@@ -1256,7 +1292,7 @@ function summarizeItem(item) {
         kind: "fileChange",
         toolCallId: item.id || null,
         status: item.status || "completed",
-        diff: item.diff || item.patch || "",
+        diff: fileChangeDiff(item),
       },
     };
   }
@@ -1468,6 +1504,13 @@ class SharedBridge {
     this.runState = { state: "connecting", label: "连接中", turnId: null, updatedAt: Date.now() };
     this.streamingStarted = false;
     this.interruptRequested = false;
+    this.activeMessage = null;
+    this.activeTools = new Map();
+    this.pendingApprovals = new Map();
+    this.usage = null;
+    this.seenCommands = new Set();
+    this.preReadyQueue = [];
+    this.startupTimer = null;
     this.events = new EventStream();
     this.events.setSink((record) => {
       const body = JSON.stringify(record);
@@ -1483,15 +1526,18 @@ class SharedBridge {
   addClient(browser) {
     this.clients.add(browser);
     this.emitTo(browser, "status", { text: "已加入共享 Codex bridge。" });
+    // Only send a snapshot once the thread is actually loaded; otherwise the
+    // client would cache an empty history. The resume-completion handler sends
+    // a full snapshot when the thread becomes ready.
     if (this.ready) {
       this.emitTo(browser, "ready", this.readyPayload());
+      this.emitTo(browser, "history.snapshot", this.snapshotPayload());
     }
-    this.emitTo(browser, "history.snapshot", this.snapshotPayload());
     browser.on("close", () => {
       this.clients.delete(browser);
       if (shouldDisposeIdleBridge({ clientCount: this.clients.size, ready: this.ready })) {
         this.upstream.close();
-        bridges.delete(this.bridgeKey);
+        if (bridges.get(this.bridgeKey) === this) bridges.delete(this.bridgeKey);
       }
     });
   }
@@ -1515,6 +1561,10 @@ class SharedBridge {
       threadId: this.threadId,
       seq: this.events.lastSeq(),
       messages: this.history,
+      activeMessage: this.activeMessage ? { ...this.activeMessage } : null,
+      activeTools: Array.from(this.activeTools.values()),
+      approvals: Array.from(this.pendingApprovals.entries()).map(([approvalId, request]) => ({ approvalId, request })),
+      usage: this.usage,
       run: this.runPayload(),
       workspace: currentWorkspaceMeta(),
     };
@@ -1524,9 +1574,58 @@ class SharedBridge {
     this.emitTo(client, "history.snapshot", this.snapshotPayload());
   }
 
+  // Maintain the normalized domain state so a snapshot is a complete, coherent
+  // view (history + in-flight message + tools + pending approvals + usage).
+  trackDomainEvent(event) {
+    if (!event || typeof event.type !== "string") return;
+    switch (event.type) {
+      case "message.started":
+        if ((event.role || "assistant") === "assistant") {
+          this.activeMessage = { messageId: event.messageId, role: "assistant", text: "" };
+        }
+        break;
+      case "message.delta":
+        if (!this.activeMessage || this.activeMessage.messageId !== event.messageId) {
+          this.activeMessage = { messageId: event.messageId, role: "assistant", text: "" };
+        }
+        this.activeMessage.text += event.delta || "";
+        break;
+      case "message.finished":
+        if (this.activeMessage && this.activeMessage.messageId === event.messageId) this.activeMessage = null;
+        break;
+      case "tool.started":
+        this.activeTools.set(event.toolCallId, {
+          toolCallId: event.toolCallId,
+          kind: event.kind,
+          name: event.name,
+          input: event.input || {},
+          status: "running",
+        });
+        break;
+      case "tool.finished":
+        this.activeTools.delete(event.toolCallId);
+        break;
+      case "approval.requested":
+        this.pendingApprovals.set(event.approvalId, event.request);
+        break;
+      case "approval.resolved":
+        this.pendingApprovals.delete(event.approvalId);
+        break;
+      case "usage.updated":
+        this.usage = { total: event.total || null, last: event.last || null };
+        break;
+      case "run.finished":
+        this.activeMessage = null;
+        break;
+      default:
+        break;
+    }
+  }
+
   // v2: append to the event log (assigning seq) and broadcast to all clients.
   // `message.delta` events are coalesced by the EventStream before broadcast.
   emitEvent(event) {
+    if (typeof this.trackDomainEvent === "function") this.trackDomainEvent(event);
     return this.events.emit(event);
   }
 
@@ -1554,10 +1653,15 @@ class SharedBridge {
     this.streamingStarted = false;
     this.interruptRequested = false;
     this.pending.clear();
+    clearTimeout(this.startupTimer);
+    this.startupTimer = null;
+    this.activeMessage = null;
+    this.activeTools.clear();
+    this.pendingApprovals.clear();
     this.setBridgeRunState("error", message);
     this.emit("error", { text: message });
     this.closeBrowserClients();
-    bridges.delete(this.bridgeKey);
+    if (bridges.get(this.bridgeKey) === this) bridges.delete(this.bridgeKey);
   }
 
   request(method, params) {
@@ -1579,8 +1683,13 @@ class SharedBridge {
   }
 
   setBridgeRunState(state, label, turnId = this.activeTurnId) {
-    this.runState = { state, label, turnId: turnId || null, updatedAt: Date.now() };
-    this.emitEvent({ type: "run.state", state, label, turnId: turnId || null });
+    const normalizedTurnId = turnId || null;
+    const prev = this.runState;
+    // Only emit on real transitions; otherwise a per-token call would flush
+    // the delta batch on every token and defeat coalescing.
+    if (prev && prev.state === state && prev.label === label && prev.turnId === normalizedTurnId) return;
+    this.runState = { state, label, turnId: normalizedTurnId, updatedAt: Date.now() };
+    this.emitEvent({ type: "run.state", state, label, turnId: normalizedTurnId });
   }
 
   runPayload() {
@@ -1626,10 +1735,24 @@ class SharedBridge {
       const id = this.request(method, params);
       this.pending.set(id, method);
       this.emit("status", { text: this.requestedThreadId ? "正在恢复已有 thread..." : "正在开始新 thread..." });
+      // Guard against an upstream that accepts the socket but never answers
+      // the startup RPC: recover instead of hanging in "connecting" forever.
+      clearTimeout(this.startupTimer);
+      this.startupTimer = setTimeout(() => {
+        if (!this.ready && !this.startupFailed) {
+          this.startupFailed = true;
+          this.markUpstreamClosed("thread 启动超时，正在重连…");
+        }
+      }, 20000);
     });
 
     this.upstream.on("message", (data) => {
-      const msg = JSON.parse(data.toString());
+      let msg;
+      try {
+        msg = JSON.parse(data.toString());
+      } catch {
+        return;
+      }
       const pendingMethod = this.pending.get(msg.id);
 
       if (msg.method) {
@@ -1638,9 +1761,15 @@ class SharedBridge {
 
       if (pendingMethod === "thread/start" || pendingMethod === "thread/resume") {
         this.pending.delete(msg.id);
+        clearTimeout(this.startupTimer);
+        this.startupTimer = null;
         if (msg.error) {
           this.startupFailed = true;
           this.emit("error", { text: msg.error.message || JSON.stringify(msg.error) });
+          const queued = this.preReadyQueue.splice(0);
+          for (const item of queued) {
+            if (item.commandId) this.emit("command.rejected", { commandId: item.commandId, reason: "startup-failed" });
+          }
           return;
         }
         this.threadId = msg.result.thread.id;
@@ -1650,6 +1779,8 @@ class SharedBridge {
         this.history = historyFromThread(msg.result.thread);
         this.setBridgeRunState("ready", "空闲");
         this.emit("ready", this.readyPayload());
+        this.emit("history.snapshot", this.snapshotPayload());
+        this.flushPreReadyQueue();
         if (this.requestedThreadId) this.emit("status", { text: `已恢复已有 thread：${this.threadId}` });
         return;
       }
@@ -1809,17 +1940,33 @@ class SharedBridge {
     if (!queuedCount) this.emit("status", { text: "没有可中断的处理。" });
   }
 
-  prompt(text, attachments = [], options = {}) {
-    if (!this.threadId) {
-      this.emit("error", { text: "Thread is not ready yet" });
-      return;
+  prompt(text, attachments = [], options = {}, commandId = null) {
+    if (commandId && this.seenCommands.has(commandId)) {
+      return { status: "accepted", duplicate: true };
     }
+    if (!this.threadId || !this.ready) {
+      // Accept and hold until the thread becomes ready; never silently drop.
+      if (this.preReadyQueue.length >= 20) return { status: "rejected", reason: "queue-full" };
+      this.preReadyQueue.push({ text, attachments, options, commandId });
+      return { status: "queued" };
+    }
+    if (commandId) this.seenCommands.add(commandId);
     if (this.activeTurnId || this.hasPendingTurnStart()) {
       this.turnQueue.push({ text, attachments, options });
       this.emit("status", { text: `已加入队列（${this.turnQueue.length} 条等待）` });
-      return;
+      return { status: "accepted", queued: true };
     }
     this.startPrompt(text, attachments, options);
+    return { status: "accepted" };
+  }
+
+  flushPreReadyQueue() {
+    if (!this.preReadyQueue.length) return;
+    const queue = this.preReadyQueue.splice(0);
+    for (const item of queue) {
+      if (item.commandId) this.seenCommands.add(item.commandId);
+      this.prompt(item.text, item.attachments, item.options, null);
+    }
   }
 
   startNextQueuedTurn() {
@@ -1931,6 +2078,11 @@ class ClaudeBridge {
     this.turnQueue = [];
     this.activeProcess = null;
     this.streamingStarted = false;
+    this.activeMessage = null;
+    this.activeTools = new Map();
+    this.pendingApprovals = new Map();
+    this.usage = null;
+    this.seenCommands = new Set();
     this.events = new EventStream();
     this.events.setSink((record) => {
       const body = JSON.stringify(record);
@@ -1950,7 +2102,7 @@ class ClaudeBridge {
       this.clients.delete(browser);
       if (shouldDisposeIdleBridge({ clientCount: this.clients.size })) {
         this.dispose();
-        bridges.delete(this.bridgeKey);
+        if (bridges.get(this.bridgeKey) === this) bridges.delete(this.bridgeKey);
       }
     });
   }
@@ -1972,11 +2124,53 @@ class ClaudeBridge {
       threadId: this.threadId,
       seq: this.events.lastSeq(),
       messages: this.history,
+      activeMessage: this.activeMessage ? { ...this.activeMessage } : null,
+      activeTools: Array.from(this.activeTools.values()),
+      approvals: Array.from(this.pendingApprovals.entries()).map(([approvalId, request]) => ({ approvalId, request })),
+      usage: this.usage,
       workspace: currentWorkspaceMeta(),
     };
   }
 
+  trackDomainEvent(event) {
+    if (!event || typeof event.type !== "string") return;
+    switch (event.type) {
+      case "message.started":
+        if ((event.role || "assistant") === "assistant") {
+          this.activeMessage = { messageId: event.messageId, role: "assistant", text: "" };
+        }
+        break;
+      case "message.delta":
+        if (!this.activeMessage || this.activeMessage.messageId !== event.messageId) {
+          this.activeMessage = { messageId: event.messageId, role: "assistant", text: "" };
+        }
+        this.activeMessage.text += event.delta || "";
+        break;
+      case "message.finished":
+        if (this.activeMessage && this.activeMessage.messageId === event.messageId) this.activeMessage = null;
+        break;
+      case "tool.started":
+        this.activeTools.set(event.toolCallId, {
+          toolCallId: event.toolCallId,
+          kind: event.kind,
+          name: event.name,
+          input: event.input || {},
+          status: "running",
+        });
+        break;
+      case "tool.finished":
+        this.activeTools.delete(event.toolCallId);
+        break;
+      case "run.finished":
+        this.activeMessage = null;
+        break;
+      default:
+        break;
+    }
+  }
+
   emitEvent(event) {
+    if (typeof this.trackDomainEvent === "function") this.trackDomainEvent(event);
     return this.events.emit(event);
   }
 
@@ -2014,13 +2208,18 @@ class ClaudeBridge {
     }
   }
 
-  prompt(text, attachments = [], options = {}) {
+  prompt(text, attachments = [], options = {}, commandId = null) {
+    if (commandId && this.seenCommands.has(commandId)) {
+      return { status: "accepted", duplicate: true };
+    }
+    if (commandId) this.seenCommands.add(commandId);
     if (this.activeTurnId || this.activeProcess) {
       this.turnQueue.push({ text, attachments, options });
       this.emit("status", { text: `已加入队列（${this.turnQueue.length} 条等待）` });
-      return;
+      return { status: "accepted", queued: true };
     }
     this.startPrompt(text, attachments, options);
+    return { status: "accepted" };
   }
 
   startNextQueuedTurn() {
@@ -2190,7 +2389,12 @@ function bindBrowser(browser, phoneToken, threadId) {
   bridge.addClient(browser);
 
   browser.on("message", (data) => {
-    const msg = JSON.parse(data.toString());
+    let msg;
+    try {
+      msg = JSON.parse(data.toString());
+    } catch {
+      return; // malformed frame only affects this client
+    }
     if (tokenRequired && msg.token !== phoneToken) {
       bridge.emitTo(browser, "error", { text: "Invalid token" });
       browser.close();
@@ -2205,12 +2409,23 @@ function bindBrowser(browser, phoneToken, threadId) {
       else if (typeof bridge.snapshotPayload === "function") bridge.emitTo(browser, "history.snapshot", bridge.snapshotPayload());
       return;
     }
-    if (msg.type === "prompt") bridge.prompt(msg.text, msg.attachments, msg.options);
+    if (msg.type === "prompt") {
+      const result = bridge.prompt(msg.text, msg.attachments, msg.options, msg.commandId);
+      if (msg.commandId && result && result.status === "rejected") {
+        bridge.emitTo(browser, "command.rejected", { commandId: msg.commandId, reason: result.reason || "rejected" });
+      } else if (msg.commandId) {
+        bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId, queued: Boolean(result && result.queued), duplicate: Boolean(result && result.duplicate) });
+      }
+    }
     if (msg.type === "interrupt") {
       if (typeof bridge.interrupt === "function") bridge.interrupt();
       else bridge.emitTo(browser, "status", { text: `${providerLabel()} provider 暂不支持运行中中断。` });
+      if (msg.commandId) bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId });
     }
-    if (msg.type === "approval") bridge.approval(msg.request, msg.decision, msg.always);
+    if (msg.type === "approval") {
+      bridge.approval(msg.request, msg.decision, msg.always);
+      if (msg.commandId) bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId });
+    }
   });
 }
 
@@ -2224,17 +2439,28 @@ async function main() {
   }
 
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    try {
+    const url = requestUrl(req);
+    if (!url) {
+      sendJson(res, 400, { error: "bad request" });
+      return;
+    }
     if (url.pathname === "/api/info") {
+      const authed = !tokenRequired || url.searchParams.get("token") === phoneToken;
       sendJson(res, 200, {
         provider: agentProvider,
         model,
-        workdir,
-        codexUrl: isCodexProvider ? codexUrl : null,
-        codexSocketPath: isCodexProvider ? codexSocketPath || null : null,
         managedCodexServer: shouldStartCodexServer,
         tokenRequired,
         authMode,
+        // Absolute paths / upstream URLs are only exposed to authenticated callers.
+        ...(authed
+          ? {
+              workdir,
+              codexUrl: isCodexProvider ? codexUrl : null,
+              codexSocketPath: isCodexProvider ? codexSocketPath || null : null,
+            }
+          : {}),
       });
       return;
     }
@@ -2513,6 +2739,14 @@ async function main() {
       return;
     }
     serveStatic(req, res);
+    } catch (error) {
+      try {
+        if (!res.headersSent) sendJson(res, 500, { error: error.message });
+        else res.end();
+      } catch {
+        /* ignore */
+      }
+    }
   });
 
   const wss = new WebSocket.Server({
@@ -2520,18 +2754,22 @@ async function main() {
     perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 6 } },
   });
   server.on("upgrade", (req, socket, head) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    if (url.pathname !== "/bridge") {
+    try {
+      const url = requestUrl(req);
+      if (!url || url.pathname !== "/bridge") {
+        socket.destroy();
+        return;
+      }
+      if (tokenRequired && url.searchParams.get("token") !== phoneToken) {
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      const threadId = url.searchParams.get("thread") || null;
+      wss.handleUpgrade(req, socket, head, (ws) => bindBrowser(ws, phoneToken, threadId));
+    } catch {
       socket.destroy();
-      return;
     }
-    if (tokenRequired && url.searchParams.get("token") !== phoneToken) {
-      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-    const threadId = url.searchParams.get("thread") || null;
-    wss.handleUpgrade(req, socket, head, (ws) => bindBrowser(ws, phoneToken, threadId));
   });
 
   server.listen(uiPort, listenHost, () => {

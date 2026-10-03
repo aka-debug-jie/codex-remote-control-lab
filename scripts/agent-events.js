@@ -44,6 +44,26 @@ function clampOutput(value, max = MAX_TOOL_OUTPUT) {
   return `${text.slice(0, max)}\n…[输出已截断，共 ${text.length} 字符]`;
 }
 
+function joinTextParts(value) {
+  if (Array.isArray(value)) return value.map((item) => (typeof item === "string" ? item : item?.text || "")).join("");
+  return typeof value === "string" ? value : "";
+}
+
+// Codex reasoning items expose text under different fields across versions.
+function reasoningText(item = {}) {
+  return item.text || joinTextParts(item.summary) || joinTextParts(item.content) || "";
+}
+
+// Codex fileChange puts diffs under changes[].diff / changes[].patch.
+function fileChangeDiff(item = {}) {
+  if (typeof item.diff === "string" && item.diff) return item.diff;
+  if (typeof item.patch === "string" && item.patch) return item.patch;
+  if (Array.isArray(item.changes)) {
+    return item.changes.map((change) => change?.diff || change?.patch || "").filter(Boolean).join("\n");
+  }
+  return "";
+}
+
 function createCodexState() {
   return { turnId: null, messageId: null, reasoningId: null };
 }
@@ -68,7 +88,12 @@ function normalizeCodexMessage(msg, state) {
     return events;
   }
 
-  if (method === "item/reasoning/delta" || method === "item/reasoningText/delta") {
+  if (
+    method === "item/reasoning/delta" ||
+    method === "item/reasoningText/delta" ||
+    method === "item/reasoning/summaryTextDelta" ||
+    method === "item/reasoning/textDelta"
+  ) {
     const messageId = params.itemId || state.reasoningId || `reasoning:${state.turnId || "unknown"}`;
     if (state.reasoningId !== messageId) {
       state.reasoningId = messageId;
@@ -137,7 +162,7 @@ function normalizeCodexMessage(msg, state) {
       events.push({
         type: EVENT_TYPES.REASONING_FINISHED,
         messageId,
-        text: item.text || item.summary || "",
+        text: reasoningText(item),
       });
       if (state.reasoningId === messageId) state.reasoningId = null;
     } else if (item.type === "commandExecution") {
@@ -156,7 +181,7 @@ function normalizeCodexMessage(msg, state) {
         toolCallId: item.id,
         kind: "fileChange",
         status: item.status || "completed",
-        diff: item.diff || item.patch || "",
+        diff: fileChangeDiff(item),
       });
     }
     return events;
@@ -186,9 +211,16 @@ function normalizeCodexMessage(msg, state) {
 
   if (method === "error") {
     const error = params.error || params;
+    const message = error.message || params.message || "Codex error";
+    // A retryable error is not terminal: keep the run alive and just surface it.
+    if (params.willRetry || error.willRetry) {
+      events.push({ type: EVENT_TYPES.STATUS, text: `重试中：${message}` });
+      events.push({ type: "run.state", state: "running", label: "重试中" });
+      return events;
+    }
     events.push({
       type: EVENT_TYPES.RUN_ERROR,
-      message: error.message || params.message || "Codex error",
+      message,
       detail: error.additionalDetails || error.codexErrorInfo || null,
     });
     return events;
@@ -215,7 +247,7 @@ function normalizeClaudeMessage(msg, state) {
       state.messageId = `claude:${state.turnId || "turn"}:${state.messageCounter}`;
       state.messageText = "";
       events.push({ type: EVENT_TYPES.MESSAGE_STARTED, messageId: state.messageId, role: "assistant", turnId: state.turnId });
-    } else if (block.type === "reasoning") {
+    } else if (block.type === "reasoning" || block.type === "thinking") {
       state.reasoningId = `reasoning:${state.turnId || "turn"}:${state.messageCounter}`;
       events.push({ type: EVENT_TYPES.REASONING_STARTED, messageId: state.reasoningId });
     } else if (block.type === "tool_use") {
@@ -276,12 +308,17 @@ function normalizeClaudeMessage(msg, state) {
   if (msg.type === "user" && Array.isArray(msg.message?.content)) {
     for (const block of msg.message.content) {
       if (block?.type === "tool_result") {
+        const content = typeof block.content === "string"
+          ? block.content
+          : Array.isArray(block.content)
+            ? block.content.map((part) => (typeof part === "string" ? part : part?.text || "")).join("\n")
+            : "";
         events.push({
           type: EVENT_TYPES.TOOL_FINISHED,
           toolCallId: block.tool_use_id,
           kind: "command",
           status: block.is_error ? "failed" : "completed",
-          output: typeof block.content === "string" ? clampOutput(block.content) : "",
+          output: clampOutput(content),
           exitCode: block.is_error ? 1 : 0,
         });
       }
@@ -290,7 +327,7 @@ function normalizeClaudeMessage(msg, state) {
   }
 
   if (msg.type === "result") {
-    events.push({ type: EVENT_TYPES.RUN_FINISHED, turnId: state.turnId, status: "completed" });
+    events.push({ type: EVENT_TYPES.RUN_FINISHED, turnId: state.turnId, status: msg.is_error ? "failed" : "completed" });
     state.turnId = null;
     state.messageId = null;
     state.reasoningId = null;
@@ -308,5 +345,7 @@ module.exports = {
   normalizeClaudeMessage,
   firstLine,
   clampOutput,
+  fileChangeDiff,
+  reasoningText,
   MAX_TOOL_OUTPUT,
 };
