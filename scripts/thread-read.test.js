@@ -1,7 +1,28 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { findLiveBridge, liveBridgeSnapshot, readThreadSnapshot } = require("./thread-read");
+const { findLiveBridge, historyRevision, liveBridgeSnapshot, readThreadSnapshot } = require("./thread-read");
+
+test("historyRevision is stable for equal histories and changes with content", () => {
+  const base = [
+    { type: "user", text: "hello" },
+    { type: "assistant", text: "hi", attachments: [{ name: "a.png" }] },
+  ];
+  const same = [
+    { type: "user", text: "hello" },
+    { type: "assistant", text: "hi", attachments: [{ name: "a.png" }] },
+  ];
+  const changed = [...base.slice(0, 1), { type: "assistant", text: "hi there" }];
+
+  assert.equal(historyRevision(base), historyRevision(same));
+  assert.notEqual(historyRevision(base), historyRevision(changed));
+});
+
+test("historyRevision reflects attachment changes", () => {
+  const withA = [{ type: "user", text: "see this", attachments: [{ name: "a.png" }] }];
+  const withB = [{ type: "user", text: "see this", attachments: [{ name: "b.png" }] }];
+  assert.notEqual(historyRevision(withA), historyRevision(withB));
+});
 
 test("liveBridgeSnapshot returns ready in-memory bridge history", () => {
   assert.deepEqual(

@@ -9,7 +9,15 @@ const WebSocket = require("ws");
 const { bridgeKeyForRequest, shouldDisposeIdleBridge, shouldPromoteBridgeKey } = require("./bridge-state");
 const { isHistorySyncEnabled, runHistorySync } = require("./history-sync");
 const { bridgeUrls, notifyBridgeUrls, notifyTaskEvent } = require("./phone-notify");
-const { findLiveBridge, readThreadSnapshot } = require("./thread-read");
+const { findLiveBridge, historyRevision, readThreadSnapshot } = require("./thread-read");
+const { EventStream } = require("./event-stream");
+const {
+  createCodexState,
+  createClaudeState,
+  normalizeCodexMessage,
+  normalizeClaudeMessage,
+  clampOutput,
+} = require("./agent-events");
 
 const root = path.resolve(__dirname, "..");
 
@@ -85,7 +93,7 @@ const debugBind = (process.env.PHONE_DEBUG_BIND || "").trim().toLowerCase();
 const debugLan = debugNoToken && debugBind === "lan";
 const authMode = debugNoToken ? "debug-no-token" : "token";
 const tokenRequired = authMode === "token";
-const listenHost = tokenRequired || debugLan ? "0.0.0.0" : "127.0.0.1";
+const listenHost = (process.env.PHONE_BIND_HOST || "").trim() || (tokenRequired || debugLan ? "0.0.0.0" : "127.0.0.1");
 const tokenPath = path.join(root, ".phone-token");
 const rateLimitCacheTtlMs = positiveNumber(process.env.PHONE_RATE_LIMIT_CACHE_TTL_MS, 5 * 60 * 1000);
 const rateLimitRefreshTimeoutMs = positiveNumber(process.env.PHONE_RATE_LIMIT_REFRESH_TIMEOUT_MS, 6000);
@@ -108,7 +116,7 @@ const imageExtensions = new Map([
 let workspaceMetaCache = {
   repoName: path.basename(workdir),
   workspaceLocation: displayPath(workdir),
-  gitBranch: "不明",
+  gitBranch: "未知",
 };
 
 function currentWorkspaceMeta() {
@@ -123,7 +131,7 @@ async function refreshWorkspaceMeta() {
   workspaceMetaCache = {
     repoName: path.basename(repoRoot),
     workspaceLocation: location,
-    gitBranch: branch || "不明",
+    gitBranch: branch || "未知",
   };
   return workspaceMetaCache;
 }
@@ -179,6 +187,18 @@ function bridgeUrlsForThread(threadId) {
   });
 }
 
+// Deep link that opens the native Android shell on a specific thread.
+// Set PHONE_APP_SCHEME="" to fall back to the HTTP bridge URL for the click.
+const appScheme = (process.env.PHONE_APP_SCHEME || "codexapp").trim();
+
+function appUrlForThread(threadId) {
+  if (!appScheme) return "";
+  const params = new URLSearchParams();
+  if (threadId) params.set("thread", threadId);
+  const query = params.toString();
+  return `${appScheme}://open${query ? `?${query}` : ""}`;
+}
+
 function bridgeUrlForThread(threadId) {
   const urls = bridgeUrlsForThread(threadId);
   return preferredBridgeUrl(urls);
@@ -186,6 +206,7 @@ function bridgeUrlForThread(threadId) {
 
 function notifyRunEvent(status, { threadId, turnId, message } = {}) {
   const urls = bridgeUrlsForThread(threadId);
+  const appUrl = appUrlForThread(threadId);
   notifyTaskEvent({
     status,
     provider: "Codex",
@@ -194,7 +215,7 @@ function notifyRunEvent(status, { threadId, turnId, message } = {}) {
     model,
     workdir,
     message,
-    url: preferredBridgeUrl(urls),
+    url: appUrl || preferredBridgeUrl(urls),
     urls,
   })
     .then((results) => logNotifyResults(`task ${status}`, results))
@@ -231,8 +252,11 @@ function waitForReady() {
 }
 
 function createUpstreamWebSocket() {
-  if (!codexSocketPath) return new WebSocket(codexUrl);
+  const token = process.env.CODEX_APP_SERVER_TOKEN;
+  const opt = token ? { headers: { Authorization: `Bearer ${token}` } } : {};
+  if (!codexSocketPath) return new WebSocket(codexUrl, opt);
   return new WebSocket(codexUrl, {
+    ...opt,
     perMessageDeflate: false,
     createConnection: () => net.createConnection(codexSocketPath),
   });
@@ -260,7 +284,7 @@ function sanitizeRateLimitWindow(item) {
   const remainingPercent = Number(item?.remainingPercent ?? item?.remaining ?? item?.percent);
   if (!label && !resetsAt && !Number.isFinite(remainingPercent)) return null;
   return {
-    label: label || "制限",
+    label: label || "限制",
     remainingPercent: Number.isFinite(remainingPercent) ? Math.max(0, Math.min(100, Math.round(remainingPercent))) : null,
     resetsAt,
   };
@@ -310,14 +334,14 @@ function envRateLimitSnapshot(provider) {
   const windows = [
     hasShortLimit
       ? sanitizeRateLimitWindow({
-          label: providerEnvValue(provider, "RATE_LIMIT_SHORT_LABEL", { legacyCodex: true }) || "5時間",
+          label: providerEnvValue(provider, "RATE_LIMIT_SHORT_LABEL", { legacyCodex: true }) || "5小时",
           remainingPercent: providerEnvValue(provider, "RATE_LIMIT_SHORT_PERCENT", { legacyCodex: true }),
           resetsAt: providerEnvValue(provider, "RATE_LIMIT_SHORT_RESET", { legacyCodex: true }),
         })
       : null,
     hasWeeklyLimit
       ? sanitizeRateLimitWindow({
-          label: providerEnvValue(provider, "RATE_LIMIT_WEEKLY_LABEL", { legacyCodex: true }) || "週あたり",
+          label: providerEnvValue(provider, "RATE_LIMIT_WEEKLY_LABEL", { legacyCodex: true }) || "每周",
           remainingPercent: providerEnvValue(provider, "RATE_LIMIT_WEEKLY_PERCENT", { legacyCodex: true }),
           resetsAt: providerEnvValue(provider, "RATE_LIMIT_WEEKLY_RESET", { legacyCodex: true }),
         })
@@ -458,7 +482,7 @@ function normalizeCodexProblem(raw) {
   if (streamDisconnected && retrying) {
     return {
       severity: "status",
-      text: `Codex応答ストリームが一時切断されました。再接続中です。${message ? ` (${message})` : ""}`,
+      text: `Codex 响应流暂时断开，正在重新连接。${message ? ` (${message})` : ""}`,
       detail,
       turnId: problem.turnId,
     };
@@ -466,7 +490,7 @@ function normalizeCodexProblem(raw) {
   if (streamDisconnected) {
     return {
       severity: "error",
-      text: "Codex応答ストリームが切断されました。再接続後にもう一度送信してください。",
+      text: "Codex 响应流已断开。请在重新连接后再次发送。",
       detail,
       turnId: problem.turnId,
     };
@@ -537,7 +561,7 @@ class AppServerRpcClient {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method} timed out`));
-      }, 8000);
+      }, 30000);
       this.pending.set(id, { method, resolve, reject, timeout });
       this.upstream.send(JSON.stringify({ id, method, params }));
     });
@@ -599,6 +623,34 @@ function sendJson(res, status, body) {
     "cache-control": "no-store",
   });
   res.end(JSON.stringify(body));
+}
+
+function sendThreadHistory(res, { provider, threadId, history, sinceRev, extra = {} }) {
+  const entries = Array.isArray(history) ? history : [];
+  const rev = historyRevision(entries);
+  if (sinceRev && sinceRev === rev) {
+    sendJson(res, 200, {
+      ...extra,
+      provider,
+      activeProvider: agentProvider,
+      threadId,
+      rev,
+      unchanged: true,
+      history: [],
+    });
+    return;
+  }
+  sendJson(res, 200, { ...extra, provider, activeProvider: agentProvider, threadId, rev, history: entries });
+}
+
+function broadcastThreadUpdated(threadId, rev = null) {
+  if (!threadId) return;
+  for (const bridge of bridges.values()) {
+    const matches =
+      bridge.threadId === threadId || bridge.requestedThreadId === threadId || bridge.bridgeKey === threadId;
+    if (!matches || !bridge.clients?.size || typeof bridge.emit !== "function") continue;
+    bridge.emit("threadUpdated", { threadId, rev });
+  }
 }
 
 function pluginIsInstalled(summary = {}) {
@@ -1023,7 +1075,27 @@ async function lastCommitReviewFiles() {
   });
 }
 
+async function insideGitRepo() {
+  try {
+    const result = await runGit(["rev-parse", "--is-inside-work-tree"]);
+    return String(result).trim() === "true";
+  } catch {
+    return false;
+  }
+}
+
 async function reviewSummary() {
+  if (!(await insideGitRepo())) {
+    return {
+      branch: null,
+      clean: true,
+      source: "working tree",
+      files: [],
+      totals: { additions: 0, deletions: 0 },
+      stat: [],
+      notGitRepo: true,
+    };
+  }
   const [branch, statusText, statText, numstatText] = await Promise.all([
     runGit(["branch", "--show-current"]),
     runGit(["status", "--porcelain=v1", "-z"]),
@@ -1102,7 +1174,23 @@ function serveStatic(req, res) {
     return;
   }
   const type = staticMimeTypes.get(path.extname(target).toLowerCase()) || "application/octet-stream";
-  res.writeHead(200, { "content-type": `${type}; charset=utf-8`, "cache-control": "no-store" });
+  let stat;
+  try {
+    stat = fs.statSync(target);
+  } catch {
+    res.writeHead(404);
+    res.end("Not found");
+    return;
+  }
+  // Revalidate on every load (no-cache) but let unchanged assets 304 so the
+  // phone does not re-download the JS/CSS bundle over the network each open.
+  const etag = `W/"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
+  if (req.headers["if-none-match"] === etag) {
+    res.writeHead(304, { etag, "cache-control": "no-cache" });
+    res.end();
+    return;
+  }
+  res.writeHead(200, { "content-type": `${type}; charset=utf-8`, "cache-control": "no-cache", etag });
   fs.createReadStream(target).pipe(res);
 }
 
@@ -1137,13 +1225,41 @@ function summarizeItem(item) {
     }
     return {
       type: "user",
-      text: textParts.join("\n") || (attachments.length ? "添付画像" : ""),
+      text: textParts.join("\n") || (attachments.length ? "附件图片" : ""),
       attachments,
     };
   }
-  if (item.type === "agentMessage") return { type: "assistant", text: stripUiDirectives(item.text) };
-  if (item.type === "commandExecution") return { type: "status", text: `$ ${item.command}` };
-  if (item.type === "fileChange") return { type: "status", text: `file changes: ${item.status}` };
+  if (item.type === "agentMessage") {
+    return { type: "assistant", text: stripUiDirectives(item.text), phase: item.phase || null };
+  }
+  if (item.type === "commandExecution") {
+    return {
+      type: "status",
+      text: `$ ${item.command}`,
+      tool: {
+        kind: "command",
+        toolCallId: item.id || null,
+        command: item.command || "",
+        cwd: item.cwd || "",
+        status: item.status || "completed",
+        output: clampOutput(item.aggregatedOutput),
+        exitCode: item.exitCode ?? null,
+        durationMs: item.durationMs ?? null,
+      },
+    };
+  }
+  if (item.type === "fileChange") {
+    return {
+      type: "status",
+      text: `file changes: ${item.status}`,
+      tool: {
+        kind: "fileChange",
+        toolCallId: item.id || null,
+        status: item.status || "completed",
+        diff: item.diff || item.patch || "",
+      },
+    };
+  }
   return null;
 }
 
@@ -1333,7 +1449,7 @@ function claudePermissionMode(options = {}) {
 function summarizeClaudeAttachmentPrompt(text, savedAttachments) {
   if (!savedAttachments.length) return text;
   const lines = savedAttachments.map((file) => `- ${file.name}: ${file.absolutePath}`);
-  return `${text || "添付ファイルを確認してください。"}\n\n添付ファイルはMac側に保存済みです。必要ならこのパスを読み取って処理してください:\n${lines.join("\n")}`;
+  return `${text || "请查看附件文件。"}\n\n附件已保存在 Mac 端。如有需要，请读取此路径并处理：\n${lines.join("\n")}`;
 }
 
 class SharedBridge {
@@ -1349,19 +1465,28 @@ class SharedBridge {
     this.startupFailed = false;
     this.history = [];
     this.turnQueue = [];
-    this.runState = { state: "connecting", label: "接続中", turnId: null, updatedAt: Date.now() };
+    this.runState = { state: "connecting", label: "连接中", turnId: null, updatedAt: Date.now() };
     this.streamingStarted = false;
     this.interruptRequested = false;
+    this.events = new EventStream();
+    this.events.setSink((record) => {
+      const body = JSON.stringify(record);
+      for (const client of this.clients) {
+        if (client.readyState === WebSocket.OPEN) client.send(body);
+      }
+    });
+    this.codexState = createCodexState();
     this.upstream = createUpstreamWebSocket();
     this.bindUpstream();
   }
 
   addClient(browser) {
     this.clients.add(browser);
-    this.emitTo(browser, "status", { text: "共有Codexブリッジに参加しました。" });
+    this.emitTo(browser, "status", { text: "已加入共享 Codex bridge。" });
     if (this.ready) {
       this.emitTo(browser, "ready", this.readyPayload());
     }
+    this.emitTo(browser, "history.snapshot", this.snapshotPayload());
     browser.on("close", () => {
       this.clients.delete(browser);
       if (shouldDisposeIdleBridge({ clientCount: this.clients.size, ready: this.ready })) {
@@ -1380,9 +1505,29 @@ class SharedBridge {
       ...currentWorkspaceMeta(),
       shared: true,
       clients: this.clients.size,
-      history: this.history,
       run: this.runPayload(),
     };
+  }
+
+  snapshotPayload() {
+    return {
+      provider: agentProvider,
+      threadId: this.threadId,
+      seq: this.events.lastSeq(),
+      messages: this.history,
+      run: this.runPayload(),
+      workspace: currentWorkspaceMeta(),
+    };
+  }
+
+  sendSnapshot(client) {
+    this.emitTo(client, "history.snapshot", this.snapshotPayload());
+  }
+
+  // v2: append to the event log (assigning seq) and broadcast to all clients.
+  // `message.delta` events are coalesced by the EventStream before broadcast.
+  emitEvent(event) {
+    return this.events.emit(event);
   }
 
   emit(type, payload = {}) {
@@ -1403,7 +1548,7 @@ class SharedBridge {
     this.clients.clear();
   }
 
-  markUpstreamClosed(message = "Codex接続が切断されました。再接続してください。") {
+  markUpstreamClosed(message = "Codex 连接已断开。请重新连接。") {
     this.ready = false;
     this.activeTurnId = null;
     this.streamingStarted = false;
@@ -1435,13 +1580,13 @@ class SharedBridge {
 
   setBridgeRunState(state, label, turnId = this.activeTurnId) {
     this.runState = { state, label, turnId: turnId || null, updatedAt: Date.now() };
-    this.emit("runState", { run: this.runPayload() });
+    this.emitEvent({ type: "run.state", state, label, turnId: turnId || null });
   }
 
   runPayload() {
     return this.runState || {
       state: this.ready ? "ready" : "connecting",
-      label: this.ready ? "待機中" : "接続中",
+      label: this.ready ? "空闲" : "连接中",
       turnId: this.activeTurnId || null,
       updatedAt: Date.now(),
     };
@@ -1480,12 +1625,16 @@ class SharedBridge {
           };
       const id = this.request(method, params);
       this.pending.set(id, method);
-      this.emit("status", { text: this.requestedThreadId ? "既存threadを再開中..." : "新しいthreadを開始中..." });
+      this.emit("status", { text: this.requestedThreadId ? "正在恢复已有 thread..." : "正在开始新 thread..." });
     });
 
     this.upstream.on("message", (data) => {
       const msg = JSON.parse(data.toString());
       const pendingMethod = this.pending.get(msg.id);
+
+      if (msg.method) {
+        for (const event of normalizeCodexMessage(msg, this.codexState)) this.emitEvent(event);
+      }
 
       if (pendingMethod === "thread/start" || pendingMethod === "thread/resume") {
         this.pending.delete(msg.id);
@@ -1499,9 +1648,9 @@ class SharedBridge {
         this.promoteBridgeKey();
         this.ready = true;
         this.history = historyFromThread(msg.result.thread);
-        this.setBridgeRunState("ready", "待機中");
+        this.setBridgeRunState("ready", "空闲");
         this.emit("ready", this.readyPayload());
-        if (this.requestedThreadId) this.emit("status", { text: `既存threadを再開しました: ${this.threadId}` });
+        if (this.requestedThreadId) this.emit("status", { text: `已恢复已有 thread：${this.threadId}` });
         return;
       }
 
@@ -1513,16 +1662,17 @@ class SharedBridge {
           if (problem.turnId) this.activeTurnId = problem.turnId;
           this.emit(problem.severity, { text: problem.text, detail: problem.detail });
           if (problem.severity === "error") {
-            this.setBridgeRunState("error", "開始に失敗", this.activeTurnId);
+            this.setBridgeRunState("error", "启动失败", this.activeTurnId);
             notifyRunEvent("failed", { threadId: this.threadId || problem.threadId, message: problem.text });
           }
           if (problem.severity === "error") this.startNextQueuedTurn();
         } else {
           this.activeTurnId = msg.result.turn.id;
           this.streamingStarted = false;
-          this.setBridgeRunState("running", "Codex 処理中", this.activeTurnId);
-          this.emit("turn", { status: "started", turnId: this.activeTurnId, run: this.runPayload() });
-          if (this.interruptRequested) this.setBridgeRunState("interrupting", "開始後に中断します", this.activeTurnId);
+          this.codexState.turnId = this.activeTurnId;
+          this.emitEvent({ type: "run.started", turnId: this.activeTurnId });
+          this.setBridgeRunState("running", "Codex 处理中", this.activeTurnId);
+          if (this.interruptRequested) this.setBridgeRunState("interrupting", "启动后中断", this.activeTurnId);
         }
         return;
       }
@@ -1531,10 +1681,10 @@ class SharedBridge {
         this.pending.delete(msg.id);
         if (msg.error) {
           const problem = normalizeCodexProblem(msg.error);
-          this.emit("error", { text: `中断に失敗しました: ${problem.text}`, detail: problem.detail });
-          this.setBridgeRunState("error", "中断に失敗", this.activeTurnId);
+          this.emit("error", { text: `中断失败：${problem.text}`, detail: problem.detail });
+          this.setBridgeRunState("error", "中断失败", this.activeTurnId);
         } else {
-          this.setBridgeRunState("interrupting", "中断中", this.activeTurnId);
+          this.setBridgeRunState("interrupting", "正在中断", this.activeTurnId);
         }
         return;
       }
@@ -1542,8 +1692,7 @@ class SharedBridge {
       if (msg.method === "item/agentMessage/delta") {
         this.flushPendingInterrupt();
         this.streamingStarted = true;
-        this.setBridgeRunState("streaming", "回答生成中", this.activeTurnId);
-        this.emit("assistantDelta", { text: msg.params.delta });
+        this.setBridgeRunState("streaming", "正在生成回答", this.activeTurnId);
         return;
       }
 
@@ -1559,7 +1708,6 @@ class SharedBridge {
         if (entry && entry.type !== "user") this.appendHistory(entry);
         const text = summarizeLiveItem(msg.params.item, "completed");
         if (text) this.emit("status", { text });
-        this.emit("event", { event: msg });
         return;
       }
 
@@ -1570,8 +1718,7 @@ class SharedBridge {
         this.interruptRequested = false;
         this.activeTurnId = null;
         this.streamingStarted = false;
-        this.setBridgeRunState(wasInterrupted ? "interrupted" : "done", wasInterrupted ? "中断しました" : "完了しました", completedTurnId);
-        this.emit("turn", { status: "completed", turnId: completedTurnId, run: this.runPayload() });
+        this.setBridgeRunState(wasInterrupted ? "interrupted" : "done", wasInterrupted ? "已中断" : "已完成", completedTurnId);
         notifyRunEvent("completed", { threadId: this.threadId, turnId: completedTurnId });
         this.syncHistory("turn completed");
         this.startNextQueuedTurn();
@@ -1579,8 +1726,12 @@ class SharedBridge {
       }
 
       if (msg.method && msg.method.endsWith("/requestApproval")) {
-        this.setBridgeRunState("approval", "承認待ち", this.activeTurnId);
-        this.emit("approval", { request: msg });
+        if (this.approvalAlways) {
+          this.respondApproval(msg, true);
+          return;
+        }
+        this.setBridgeRunState("approval", "等待审批", this.activeTurnId);
+        this.emitEvent({ type: "approval.requested", approvalId: msg.id, request: msg });
         notifyRunEvent("approval", {
           threadId: this.threadId,
           turnId: this.activeTurnId,
@@ -1594,22 +1745,20 @@ class SharedBridge {
         const problem = normalizeCodexProblem(msg.params);
         if (problem.turnId) this.activeTurnId = problem.turnId;
         this.emit(problem.severity, { text: problem.text, detail: problem.detail });
-        if (problem.severity === "error") this.setBridgeRunState("error", "エラー", this.activeTurnId);
+        if (problem.severity === "error") this.setBridgeRunState("error", "错误", this.activeTurnId);
         return;
       }
-
-      this.emit("event", { event: msg });
     });
 
     this.upstream.on("error", (error) => {
       if (!this.ready) this.startupFailed = true;
       this.interruptRequested = false;
-      this.setBridgeRunState("error", "接続エラー", this.activeTurnId);
+      this.setBridgeRunState("error", "连接错误", this.activeTurnId);
       this.emit("error", { text: error.message });
     });
     this.upstream.on("close", () => {
       if (!this.ready) this.startupFailed = true;
-      this.markUpstreamClosed("Codex接続が閉じました。再接続ボタンを押してください。");
+      this.markUpstreamClosed("Codex 连接已关闭，正在自动重连…");
     });
   }
 
@@ -1621,8 +1770,8 @@ class SharedBridge {
     });
     if (!id) return false;
     this.pending.set(id, "turn/interrupt");
-    this.setBridgeRunState("interrupting", "中断中", turnId);
-    this.emit("status", { text: "処理の中断を要求しました。" });
+    this.setBridgeRunState("interrupting", "正在中断", turnId);
+    this.emit("status", { text: "已请求中断处理。" });
     return true;
   }
 
@@ -1635,29 +1784,29 @@ class SharedBridge {
   interrupt() {
     const queuedCount = this.turnQueue.length;
     this.turnQueue = [];
-    if (queuedCount) this.emit("status", { text: `待機中の送信を破棄しました（${queuedCount}件）。` });
+    if (queuedCount) this.emit("status", { text: `已丢弃排队中的发送（${queuedCount} 条）。` });
 
     if (this.activeTurnId) {
       try {
         this.interruptRequested = false;
         if (!this.sendTurnInterrupt(this.activeTurnId)) {
-          this.emit("status", { text: "中断要求はすでに送信済みです。" });
+          this.emit("status", { text: "中断请求已发送。" });
         }
       } catch (error) {
-        this.setBridgeRunState("error", "中断に失敗", this.activeTurnId);
-        this.emit("error", { text: `中断要求の送信に失敗しました: ${error.message}` });
+        this.setBridgeRunState("error", "中断失败", this.activeTurnId);
+        this.emit("error", { text: `发送中断请求失败：${error.message}` });
       }
       return;
     }
 
     if (this.hasPendingTurnStart()) {
       this.interruptRequested = true;
-      this.setBridgeRunState("interrupting", "開始後に中断します");
-      this.emit("status", { text: "開始待ちの処理を中断予約しました。" });
+      this.setBridgeRunState("interrupting", "启动后中断");
+      this.emit("status", { text: "已预约中断待启动的处理。" });
       return;
     }
 
-    if (!queuedCount) this.emit("status", { text: "中断できる処理はありません。" });
+    if (!queuedCount) this.emit("status", { text: "没有可中断的处理。" });
   }
 
   prompt(text, attachments = [], options = {}) {
@@ -1667,7 +1816,7 @@ class SharedBridge {
     }
     if (this.activeTurnId || this.hasPendingTurnStart()) {
       this.turnQueue.push({ text, attachments, options });
-      this.emit("status", { text: `キューに追加しました（${this.turnQueue.length}件待機）` });
+      this.emit("status", { text: `已加入队列（${this.turnQueue.length} 条等待）` });
       return;
     }
     this.startPrompt(text, attachments, options);
@@ -1676,7 +1825,7 @@ class SharedBridge {
   startNextQueuedTurn() {
     if (!this.ready || this.activeTurnId || this.hasPendingTurnStart() || !this.turnQueue.length) return;
     const next = this.turnQueue.shift();
-    this.emit("status", { text: `キューから送信中（残り${this.turnQueue.length}件）` });
+    this.emit("status", { text: `正在从队列发送（剩余 ${this.turnQueue.length} 条）` });
     this.startPrompt(next.text, next.attachments, next.options);
   }
 
@@ -1689,10 +1838,13 @@ class SharedBridge {
       enabled: historySyncEnabled,
     })
       .then((result) => {
-        if (!result.skipped) this.emit("status", { text: `履歴同期を更新しました (${reason})` });
+        if (!result.skipped) {
+          this.emit("status", { text: `历史同步已更新 (${reason})` });
+          broadcastThreadUpdated(this.threadId);
+        }
       })
       .catch((error) => {
-        this.emit("status", { text: `履歴同期に失敗しました: ${error.message}` });
+        this.emit("status", { text: `历史同步失败：${error.message}` });
       });
   }
 
@@ -1712,17 +1864,28 @@ class SharedBridge {
       input,
     };
     if (options.model) params.model = options.model;
-    if (options.approvalPolicy) params.approvalPolicy = options.approvalPolicy;
+    if (options.effort) params.effort = options.effort;
+    if (this.approvalAlways) params.approvalPolicy = "never";
+    else if (options.approvalPolicy) params.approvalPolicy = options.approvalPolicy;
     if (options.sandboxMode) params.sandboxPolicy = sandboxPolicyForMode(options.sandboxMode);
     const id = this.request("turn/start", {
       ...params,
     });
     if (!id) return;
     this.pending.set(id, "turn/start");
-    this.setBridgeRunState("running", "Codex 処理中");
-    const displayText = savedImages.length ? `${text}\n\n添付: ${savedImages.map((image) => image.name).join(", ")}` : text;
+    this.setBridgeRunState("running", "Codex 处理中");
+    const displayText = savedImages.length ? `${text}\n\n附件：${savedImages.map((image) => image.name).join(", ")}` : text;
     this.appendHistory({ type: "user", text: displayText, attachments: savedImages });
-    this.emit("user", { text: displayText, attachments: savedImages });
+    this.userMessageCounter = (this.userMessageCounter || 0) + 1;
+    const userMessageId = `user:${this.threadId}:${this.userMessageCounter}`;
+    this.emitEvent({ type: "message.started", messageId: userMessageId, role: "user", turnId: this.activeTurnId });
+    this.emitEvent({
+      type: "message.finished",
+      messageId: userMessageId,
+      role: "user",
+      text: displayText,
+      attachments: savedImages,
+    });
   }
 
   appendHistory(entry) {
@@ -1730,23 +1893,28 @@ class SharedBridge {
     this.history = capHistory(this.history);
   }
 
-  approval(requestMsg, decision) {
-    if (!requestMsg || !requestMsg.id || !requestMsg.method) return;
-    const accept = decision === "accept";
-    let result;
-    if (requestMsg.method === "item/commandExecution/requestApproval") {
-      result = { decision: accept ? "accept" : "decline" };
-    } else if (requestMsg.method === "item/fileChange/requestApproval") {
-      result = { decision: accept ? "accept" : "decline" };
-    } else {
-      result = accept ? { decision: "accept" } : { decision: "decline" };
+  approvalResultFor(method, accept) {
+    if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
+      return { decision: accept ? "accept" : "decline" };
     }
+    return accept ? { decision: "accept" } : { decision: "decline" };
+  }
+
+  respondApproval(requestMsg, accept) {
     if (!this.upstream || this.upstream.readyState !== WebSocket.OPEN) {
       this.markUpstreamClosed();
       return;
     }
-    this.upstream.send(JSON.stringify({ id: requestMsg.id, result }));
-    this.emit("status", { text: accept ? "承認しました" : "拒否しました" });
+    this.upstream.send(JSON.stringify({ id: requestMsg.id, result: this.approvalResultFor(requestMsg.method, accept) }));
+    this.emitEvent({ type: "approval.resolved", approvalId: requestMsg.id, decision: accept ? "accept" : "decline" });
+  }
+
+  approval(requestMsg, decision, always = false) {
+    if (!requestMsg || !requestMsg.id || !requestMsg.method) return;
+    if (always) this.approvalAlways = true;
+    const accept = decision === "accept" || decision === "approve" || always;
+    this.respondApproval(requestMsg, accept);
+    this.emit("status", { text: accept ? (always ? "已批准（本会话始终允许）" : "已批准") : "已拒绝" });
   }
 }
 
@@ -1763,12 +1931,21 @@ class ClaudeBridge {
     this.turnQueue = [];
     this.activeProcess = null;
     this.streamingStarted = false;
+    this.events = new EventStream();
+    this.events.setSink((record) => {
+      const body = JSON.stringify(record);
+      for (const client of this.clients) {
+        if (client.readyState === WebSocket.OPEN) client.send(body);
+      }
+    });
+    this.claudeState = createClaudeState();
   }
 
   addClient(browser) {
     this.clients.add(browser);
-    this.emitTo(browser, "status", { text: "共有Claudeブリッジに参加しました。" });
+    this.emitTo(browser, "status", { text: "已加入共享 Claude bridge。" });
     this.emitTo(browser, "ready", this.readyPayload());
+    this.emitTo(browser, "history.snapshot", this.snapshotPayload());
     browser.on("close", () => {
       this.clients.delete(browser);
       if (shouldDisposeIdleBridge({ clientCount: this.clients.size })) {
@@ -1786,8 +1963,21 @@ class ClaudeBridge {
       workdir,
       shared: true,
       clients: this.clients.size,
-      history: this.history,
     };
+  }
+
+  snapshotPayload() {
+    return {
+      provider: agentProvider,
+      threadId: this.threadId,
+      seq: this.events.lastSeq(),
+      messages: this.history,
+      workspace: currentWorkspaceMeta(),
+    };
+  }
+
+  emitEvent(event) {
+    return this.events.emit(event);
   }
 
   emit(type, payload = {}) {
@@ -1827,7 +2017,7 @@ class ClaudeBridge {
   prompt(text, attachments = [], options = {}) {
     if (this.activeTurnId || this.activeProcess) {
       this.turnQueue.push({ text, attachments, options });
-      this.emit("status", { text: `キューに追加しました（${this.turnQueue.length}件待機）` });
+      this.emit("status", { text: `已加入队列（${this.turnQueue.length} 条等待）` });
       return;
     }
     this.startPrompt(text, attachments, options);
@@ -1836,7 +2026,7 @@ class ClaudeBridge {
   startNextQueuedTurn() {
     if (this.activeTurnId || this.activeProcess || !this.turnQueue.length) return;
     const next = this.turnQueue.shift();
-    this.emit("status", { text: `キューから送信中（残り${this.turnQueue.length}件）` });
+    this.emit("status", { text: `正在从队列发送（剩余 ${this.turnQueue.length} 条）` });
     this.startPrompt(next.text, next.attachments, next.options);
   }
 
@@ -1852,14 +2042,15 @@ class ClaudeBridge {
 
     const promptText = summarizeClaudeAttachmentPrompt(text, savedAttachments);
     const displayText = savedAttachments.length
-      ? `${text || "添付ファイルを確認してください。"}\n\n添付: ${savedAttachments.map((file) => file.name).join(", ")}`
+      ? `${text || "请查看附件文件。"}\n\n附件：${savedAttachments.map((file) => file.name).join(", ")}`
       : text;
     const turnId = `claude-turn:${crypto.randomUUID()}`;
     this.activeTurnId = turnId;
     this.streamingStarted = false;
     this.appendHistory({ type: "user", text: displayText, attachments: savedImages });
-    this.emit("user", { text: displayText, attachments: savedImages });
-    this.emit("turn", { status: "started", turnId });
+    this.emitEvent({ type: "message.started", messageId: `user:${turnId}`, role: "user", turnId });
+    this.emitEvent({ type: "message.finished", messageId: `user:${turnId}`, role: "user", text: displayText, attachments: savedImages });
+    this.emitEvent({ type: "run.started", turnId });
 
     const args = [
       "-p",
@@ -1913,6 +2104,8 @@ class ClaudeBridge {
         this.claudeSessionId = msg.session_id;
         this.promoteBridgeKey();
       }
+      this.claudeState.turnId = turnId;
+      for (const event of normalizeClaudeMessage(msg, this.claudeState)) this.emitEvent(event);
       if (msg.type === "system" && msg.subtype === "init") {
         this.emit("status", { text: `Claude session ready: ${msg.session_id || this.threadId}` });
         return;
@@ -1924,14 +2117,14 @@ class ClaudeBridge {
       const delta = msg.type === "stream_event" && msg.event?.delta?.type === "text_delta" ? msg.event.delta.text : "";
       if (delta) {
         assistantText += delta;
-        this.emit("assistantDelta", { text: delta });
         return;
       }
-      if (msg.type === "result") {
-        if (!assistantText && msg.result) {
-          assistantText = String(msg.result);
-          this.emit("assistantDelta", { text: assistantText });
-        }
+      if (msg.type === "result" && !assistantText && msg.result) {
+        assistantText = String(msg.result);
+        const fallbackId = `claude:${turnId}:fallback`;
+        this.emitEvent({ type: "message.started", messageId: fallbackId, role: "assistant", turnId });
+        this.emitEvent({ type: "message.delta", messageId: fallbackId, delta: assistantText });
+        this.emitEvent({ type: "message.finished", messageId: fallbackId, role: "assistant", text: assistantText });
       }
     };
 
@@ -1953,7 +2146,7 @@ class ClaudeBridge {
     });
     child.on("error", (error) => {
       if (!clearActiveProcess()) return;
-      this.emit("error", { text: `Claudeを起動できませんでした: ${error.message}` });
+      this.emit("error", { text: `无法启动 Claude：${error.message}` });
       this.startNextQueuedTurn();
     });
     child.on("exit", (code, signal) => {
@@ -1961,7 +2154,7 @@ class ClaudeBridge {
       if (stdoutBuffer.trim()) handleLine(stdoutBuffer);
       if (code === 0) {
         if (assistantText.trim()) this.appendHistory({ type: "assistant", text: assistantText, outputGroup: turnId });
-        this.emit("turn", { status: "completed", turnId });
+        this.emitEvent({ type: "run.finished", turnId, status: "completed" });
       } else {
         const reason = signal ? `signal=${signal}` : `code=${code}`;
         const message = `Claude process exited (${reason})${stderrBuffer.trim() ? `: ${stderrBuffer.trim().slice(-1000)}` : ""}`;
@@ -1977,7 +2170,7 @@ class ClaudeBridge {
   }
 
   approval() {
-    this.emit("status", { text: "Claude headless providerでは実行中の承認応答は未対応です。" });
+    this.emit("status", { text: "Claude headless provider 暂不支持运行中的审批响应。" });
   }
 }
 
@@ -2003,12 +2196,21 @@ function bindBrowser(browser, phoneToken, threadId) {
       browser.close();
       return;
     }
+    if (msg.type === "ping") {
+      bridge.emitTo(browser, "pong", {});
+      return;
+    }
+    if (msg.type === "resync") {
+      if (typeof bridge.sendSnapshot === "function") bridge.sendSnapshot(browser);
+      else if (typeof bridge.snapshotPayload === "function") bridge.emitTo(browser, "history.snapshot", bridge.snapshotPayload());
+      return;
+    }
     if (msg.type === "prompt") bridge.prompt(msg.text, msg.attachments, msg.options);
     if (msg.type === "interrupt") {
       if (typeof bridge.interrupt === "function") bridge.interrupt();
-      else bridge.emitTo(browser, "status", { text: `${providerLabel()} providerでは実行中の中断は未対応です。` });
+      else bridge.emitTo(browser, "status", { text: `${providerLabel()} provider 暂不支持运行中中断。` });
     }
-    if (msg.type === "approval") bridge.approval(msg.request, msg.decision);
+    if (msg.type === "approval") bridge.approval(msg.request, msg.decision, msg.always);
   });
 }
 
@@ -2050,7 +2252,7 @@ async function main() {
           sortKey: "updated_at",
           sortDirection: "desc",
           archived: false,
-          useStateDbOnly: false,
+          useStateDbOnly: true,
         });
         sendJson(res, 200, { ...result, provider: requestedProvider, activeProvider: agentProvider });
       } catch (error) {
@@ -2199,11 +2401,11 @@ async function main() {
       }
       if (requestedProvider === "claude") {
         const bridge = Array.from(bridges.values()).find((item) => item.threadId === threadId || item.bridgeKey === threadId);
-        sendJson(res, 200, {
+        sendThreadHistory(res, {
           provider: requestedProvider,
-          activeProvider: agentProvider,
           threadId,
           history: bridge?.history?.length ? bridge.history : claudeHistoryForSession(threadId),
+          sinceRev: url.searchParams.get("sinceRev"),
         });
         return;
       }
@@ -2216,7 +2418,13 @@ async function main() {
           workdir,
           historyFromThread,
         });
-        sendJson(res, 200, { provider: requestedProvider, activeProvider: agentProvider, ...snapshot });
+        sendThreadHistory(res, {
+          provider: requestedProvider,
+          threadId: snapshot.threadId || threadId,
+          history: snapshot.history,
+          sinceRev: url.searchParams.get("sinceRev"),
+          extra: snapshot,
+        });
       } catch (error) {
         if (requestedProvider !== agentProvider) {
           sendJson(res, 200, { provider: requestedProvider, activeProvider: agentProvider, threadId, history: [], unavailable: error.message });
@@ -2307,7 +2515,10 @@ async function main() {
     serveStatic(req, res);
   });
 
-  const wss = new WebSocket.Server({ noServer: true });
+  const wss = new WebSocket.Server({
+    noServer: true,
+    perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 6 } },
+  });
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (url.pathname !== "/bridge") {
@@ -2326,7 +2537,7 @@ async function main() {
   server.listen(uiPort, listenHost, () => {
     const addresses = tokenRequired || debugLan ? lanAddresses() : ["127.0.0.1"];
     const urls = bridgeUrls(addresses, uiPort, phoneToken);
-    notificationBridgeUrls = urls;
+    notificationBridgeUrls = bridgeUrls(addresses, uiPort, ""); // 通知里不带 token,避免推送到 ntfy.sh 时泄露
     console.log("");
     console.log(`${isClaudeProvider ? "Claude" : "Codex"} shared browser bridge is ready.`);
     for (const url of urls) console.log(`  ${url}`);
@@ -2348,7 +2559,7 @@ async function main() {
       return;
     }
 
-    notifyBridgeUrls(urls)
+    notifyBridgeUrls(notificationBridgeUrls)
       .then((results) => logNotifyResults("startup", results))
       .catch((error) => console.warn(`[notify] startup error: ${error.message}`));
   });

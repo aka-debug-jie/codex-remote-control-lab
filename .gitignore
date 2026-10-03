@@ -12,3 +12,6 @@ docs/.vitepress/cache/
 .phone-workspaces.json
 .uploads/
 tmp/
+
+.env.*
+!.env.example

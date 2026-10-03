@@ -1,3 +1,16 @@
+const crypto = require("node:crypto");
+
+function historyRevision(history = []) {
+  const canonical = JSON.stringify(
+    (history || []).map((entry) => [
+      entry?.type || "",
+      entry?.text || "",
+      (entry?.attachments || []).map((attachment) => attachment?.name || attachment?.url || ""),
+    ]),
+  );
+  return crypto.createHash("sha1").update(canonical).digest("hex").slice(0, 12);
+}
+
 function liveBridgeSnapshot(bridge, threadId) {
   if (!bridge) return null;
   const matchesThread = bridge.threadId === threadId || bridge.requestedThreadId === threadId;
@@ -52,6 +65,7 @@ async function readThreadSnapshot({ threadId, liveBridge, request, model, workdi
 
 module.exports = {
   findLiveBridge,
+  historyRevision,
   liveBridgeSnapshot,
   readThreadSnapshot,
 };

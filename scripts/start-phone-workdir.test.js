@@ -8,6 +8,7 @@ const { spawnSync } = require("child_process");
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-phone-workdir-"));
 const workdir = path.join(tempRoot, "active-workspace");
 fs.mkdirSync(workdir, { recursive: true });
+process.env.PHONE_WORKDIR = workdir;
 process.env.CODEX_WORKDIR = workdir;
 process.env.CODEX_HOME = path.join(tempRoot, "codex-home");
 
