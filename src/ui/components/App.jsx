@@ -255,15 +255,9 @@ export function App() {
     promptRef.current?.focus();
   }, []);
 
-  const onSearchChange = useCallback(
-    (value) => {
-      setSearchState((s) => ({ ...s, query: value }));
-      const el = document.getElementById("log");
-      if (el) el.dataset.query = value;
-      window.dispatchEvent(new CustomEvent("codex-search", { detail: value }));
-    },
-    [],
-  );
+  const onSearchChange = useCallback((value) => {
+    setSearchState((s) => ({ ...s, query: value }));
+  }, []);
 
   const selectedThreadTitle = threads.find((t) => t.id === selectedThread);
   const statusLabel = runStateText[run.state] || run.label;

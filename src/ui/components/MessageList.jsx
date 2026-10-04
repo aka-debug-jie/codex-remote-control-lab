@@ -128,6 +128,10 @@ export function MessageList({ onLongPress, searchQuery, onCount, onScrollToggle 
     return () => clearTimeout(handle);
   }, [messages, threadId]);
 
+  useEffect(() => {
+    setVisibleCount(WINDOW_SIZE);
+  }, [threadId]);
+
   const toBottom = () => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
