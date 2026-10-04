@@ -88,6 +88,25 @@ npm run docs:build
 npm audit --omit=dev
 ```
 
+### Frontend build (Vite)
+
+The mobile UI lives in `src/ui/` and is built with Vite into `public/` (the
+directory the bridge serves). React + a small MD3/"liquid glass" stylesheet;
+no runtime framework beyond React. Editable source of truth is `src/ui/` —
+never hand-edit `public/`.
+
+```bash
+npm run build:ui     # vite build -> public/ (hashed assets + copied static files)
+npm run dev:ui       # hot-reload dev server, proxies /api and /bridge to the bridge
+```
+
+`npm run dev:ui` proxies to `PHONE_DEV_PROXY` (default `http://100.108.139.80:45214`);
+open the dev URL with `?token=<bridge token>` to develop against the live session.
+
+The bridge serves hashed `/assets/*` with a one-year immutable cache and
+brotli/gzip compression, re-validates `index.html`/`sw.js`, and sends a
+Content-Security-Policy plus `nosniff`/`no-referrer` headers (`scripts/static-serve.js`).
+
 Protocol-only smoke test:
 
 ```bash

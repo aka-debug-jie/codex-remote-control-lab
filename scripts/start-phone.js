@@ -145,15 +145,8 @@ async function refreshWorkspaceMeta() {
   return workspaceMetaCache;
 }
 
-const staticMimeTypes = new Map([
-  [".css", "text/css"],
-  [".html", "text/html"],
-  [".js", "application/javascript"],
-  [".json", "application/json"],
-  [".png", "image/png"],
-  [".svg", "image/svg+xml"],
-  [".webmanifest", "application/manifest+json"],
-]);
+const { makeStaticServer } = require("./static-serve");
+const serveStatic = makeStaticServer({ publicRoot: path.join(root, "public") });
 
 function getToken() {
   if (process.env.PHONE_TOKEN) return process.env.PHONE_TOKEN;
@@ -1179,55 +1172,6 @@ function requestUrl(req) {
   } catch {
     return null;
   }
-}
-
-function serveStatic(req, res) {
-  const parsed = requestUrl(req);
-  if (!parsed) {
-    res.writeHead(400);
-    res.end("Bad request");
-    return;
-  }
-  const requestPath = parsed.pathname;
-  const file = requestPath === "/" ? "index.html" : requestPath.slice(1);
-  const publicRoot = path.join(root, "public");
-  const target = path.join(publicRoot, file);
-  if (!target.startsWith(`${publicRoot}${path.sep}`) && target !== publicRoot) {
-    res.writeHead(403);
-    res.end("Forbidden");
-    return;
-  }
-  let stat;
-  try {
-    stat = fs.statSync(target);
-  } catch {
-    res.writeHead(404);
-    res.end("Not found");
-    return;
-  }
-  // Only serve regular files — a directory (e.g. /assets/) must not open a
-  // read stream that emits an unhandled EISDIR and crashes the process.
-  if (!stat.isFile()) {
-    res.writeHead(404);
-    res.end("Not found");
-    return;
-  }
-  const type = staticMimeTypes.get(path.extname(target).toLowerCase()) || "application/octet-stream";
-  // Revalidate on every load (no-cache) but let unchanged assets 304 so the
-  // phone does not re-download the JS/CSS bundle over the network each open.
-  const etag = `W/"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
-  if (req.headers["if-none-match"] === etag) {
-    res.writeHead(304, { etag, "cache-control": "no-cache" });
-    res.end();
-    return;
-  }
-  res.writeHead(200, { "content-type": `${type}; charset=utf-8`, "cache-control": "no-cache", etag });
-  const stream = fs.createReadStream(target);
-  stream.on("error", () => {
-    if (!res.headersSent) res.writeHead(500);
-    res.end();
-  });
-  stream.pipe(res);
 }
 
 function stripUiDirectives(text) {

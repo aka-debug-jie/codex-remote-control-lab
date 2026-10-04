@@ -13,15 +13,18 @@ Thanks for helping make this lab easier to reuse.
 ```bash
 npm ci
 npx playwright install chromium   # required for the UI tests (browser binary)
-npm run build:ui                  # bundle src/ui -> public/main.js
+npm run build:ui                  # vite build src/ui -> public/
+npm run dev:ui                    # hot-reload dev server (proxies /api + /bridge)
 npm run check                     # build check (non-destructive) + syntax checks
 npm test                          # node --test scripts/*.test.js
 npm run docs:build
 ```
 
-The browser client is React source under `src/ui/` and is bundled into
-`public/main.js` by `npm run build:ui` (esbuild). Edit `src/ui/`, not the
-generated `public/main.js` / `public/index.html`.
+The browser client is a React app under `src/ui/` (Vite root). `npm run build:ui`
+bundles it into `public/` as hashed `assets/*` plus copied static files
+(icons, manifest, service worker). Edit `src/ui/`, never the generated `public/`
+output. The MD3 + liquid-glass styles live in `src/ui/styles/`; the bridge's
+static serving, compression and security headers live in `scripts/static-serve.js`.
 
 For manual bridge testing:
 

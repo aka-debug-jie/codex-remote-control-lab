@@ -1,0 +1,74 @@
+/* =================================================================
+ * Liquid-glass material layer (moderate intensity).
+ * Rule: at most ~3 elements with backdrop-filter are mounted at once —
+ * top bar, composer, and one active sheet/drawer/FAB.
+ * ================================================================= */
+
+.glass {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+.glass-strong {
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  backdrop-filter: blur(28px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+/* Specular edge: a bright 1px inset at the top edge + soft inner rim, the
+ * cheap "refraction" hint that sells glass on a matte WebView. */
+.glass-edge {
+  position: relative;
+}
+.glass-edge::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    160deg,
+    var(--glass-highlight) 0%,
+    rgba(255, 255, 255, 0) 38%,
+    rgba(255, 255, 255, 0) 62%,
+    color-mix(in srgb, var(--glass-highlight) 45%, transparent) 100%
+  );
+  opacity: 0.55;
+  mix-blend-mode: screen;
+}
+
+/* Ambient, slowly drifting background so blur has something to refract.
+ * Transform-only animation keeps it on the compositor. */
+.ambient {
+  position: fixed;
+  inset: -20%;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(42% 40% at 18% 22%, var(--ambient-1) 0%, transparent 70%),
+    radial-gradient(46% 42% at 82% 30%, var(--ambient-2) 0%, transparent 72%),
+    radial-gradient(50% 46% at 50% 88%, var(--ambient-3) 0%, transparent 74%);
+  filter: blur(20px) saturate(120%);
+  animation: ambient-drift 64s ease-in-out infinite alternate;
+  will-change: transform;
+}
+
+@keyframes ambient-drift {
+  from {
+    transform: translate3d(-2%, -1%, 0) scale(1.05);
+  }
+  to {
+    transform: translate3d(3%, 2%, 0) scale(1.12);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ambient {
+    animation: none;
+  }
+}

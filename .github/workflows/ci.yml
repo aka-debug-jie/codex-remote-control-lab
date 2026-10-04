@@ -30,7 +30,10 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install chromium
 
-      - name: Check JavaScript syntax
+      - name: Build UI bundle
+        run: npm run build:ui
+
+      - name: Check JavaScript syntax & bundle
         run: npm run check
 
       - name: Run tests

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Codex Remote favicon</title>
+  <desc id="desc">A flat phone and terminal bridge icon.</desc>
+  <rect width="128" height="128" rx="28" fill="#15151a"/>
+  <path d="M31 27h42a8 8 0 0 1 8 8v58a8 8 0 0 1-8 8H31a8 8 0 0 1-8-8V35a8 8 0 0 1 8-8Z" fill="#f6f3ea"/>
+  <path d="M35 43h34v6H35zm0 14h24v6H35zm0 14h29v6H35z" fill="#15151a"/>
+  <path d="M75 44h17a15 15 0 0 1 0 30H78" fill="none" stroke="#41d6a4" stroke-width="9" stroke-linecap="round"/>
+  <path d="M86 86h18" stroke="#ffb347" stroke-width="9" stroke-linecap="round"/>
+  <circle cx="99" cy="44" r="8" fill="#ffb347"/>
+</svg>

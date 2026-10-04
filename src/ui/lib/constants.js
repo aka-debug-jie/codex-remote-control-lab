@@ -1,8 +1,7 @@
 export const themeOptions = [
-  { id: "simple", name: "简约", detail: "安静的本地面板" },
-  { id: "cyberpunk", name: "赛博朋克", detail: "绿色终端文字 / 流动代码背景" },
-  { id: "botanical", name: "植物", detail: "绿色 / 温暖的奶油色" },
-  { id: "stigmata", name: "Stigmata", detail: "冰青 / 银白 / 红色贩卖机的余晖" },
+  { id: "system", name: "跟随系统", detail: "随系统深浅色自动切换" },
+  { id: "light", name: "浅色", detail: "明亮的液态玻璃" },
+  { id: "dark", name: "深色", detail: "沉浸的深空玻璃" },
 ];
 
 export const accessModes = [

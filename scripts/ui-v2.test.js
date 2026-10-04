@@ -161,6 +161,16 @@ async function boot(t, options = {}) {
   return { page, errors, origin: server.origin };
 }
 
+// Long-press a message to open the MD3 action sheet.
+async function longPress(page, locator) {
+  const box = await locator.boundingBox();
+  await page.mouse.move(box.x + 6, box.y + 6);
+  await page.mouse.down();
+  await page.waitForTimeout(650);
+  await page.mouse.up();
+  await page.waitForSelector(".bottom-sheet.open", { timeout: 3000 });
+}
+
 test("renders the React shell with composer, sidebar and run state", async (t) => {
   const { page, errors } = await boot(t, { apiState: { threads: [{ id: "t1", name: "Thread 1", updatedAt: Date.now() }] } });
   assert.equal(await page.locator("#composer").count(), 1);
@@ -223,35 +233,35 @@ test("tool events render structured tool cards with command and output", async (
   assert.match(await page.locator(".tool-output pre").first().textContent(), /hi/);
 });
 
-test("model menu opens and selecting reasoning updates the label", async (t) => {
+test("model sheet opens and selecting reasoning updates the label", async (t) => {
   const { page } = await boot(t);
   await page.click("#modelButton");
-  await page.waitForTimeout(150);
-  assert.ok(await page.locator("#modelMenu").isVisible());
-  await page.locator('.model-menu-row:has-text("高")').first().click();
+  await page.waitForSelector(".bottom-sheet.open");
+  await page.locator('.segmented button:has-text("高")').first().click();
   await page.waitForTimeout(150);
   assert.match(await page.locator("#modelButton").innerText(), /高/);
 });
 
-test("right panel tabs switch titles and theme selection keeps the panel open", async (t) => {
+test("panels sheet tabs switch titles and theme selection keeps the sheet open", async (t) => {
   const { page } = await boot(t, { apiState: { review: { notGitRepo: true }, workspace: [{ path: "a.md", name: "a.md", kind: "markdown" }] } });
   await page.click("#menuButton");
-  await page.waitForTimeout(200);
+  await page.waitForSelector(".bottom-sheet.open");
   for (const [label, selector] of [["工作区", "#workspaceTab"], ["审查", "#reviewTab"], ["后台", "#statusButton"], ["信息来源", "#webSearchButton"], ["产物", "#artifactTab"]]) {
     await page.click(selector);
     await page.waitForTimeout(400);
     assert.match(await page.locator("#artifactTitle").innerText(), new RegExp(label));
   }
-  await page.click("#mobileThreads").catch(() => {});
-  await page.waitForTimeout(150);
-  await page.click("#settingsButton").catch(() => {});
-  await page.waitForTimeout(400);
+  await page.locator(".bottom-sheet.open .sheet-close").click();
+  await page.waitForTimeout(300);
+  await page.click("#mobileThreads");
+  await page.waitForSelector(".drawer.open");
+  await page.click("#settingsButton");
+  await page.waitForSelector(".bottom-sheet.open");
   const options = page.locator(".theme-option");
-  if (await options.count()) {
-    await options.nth(2).click();
-    await page.waitForTimeout(200);
-    assert.ok(await page.locator("#artifactPanel").isVisible());
-  }
+  assert.ok((await options.count()) >= 3);
+  await options.nth(2).click();
+  await page.waitForTimeout(200);
+  assert.ok(await page.locator(".bottom-sheet.open").isVisible());
 });
 
 test("access button cycles sandbox modes", async (t) => {
@@ -397,13 +407,15 @@ test("retry on a user message re-sends it; edit fills the composer", async (t) =
     },
   });
   await page.getByText("原始提问内容").first().waitFor();
-  await page.locator('.entry.user button[aria-label="重试"]').first().click();
+  await longPress(page, page.locator(".entry.user").first());
+  await page.locator('.bottom-sheet .list-row:has-text("重试")').click();
   await page.waitForTimeout(120);
   const prompt = (await page.evaluate(() => window.__sentFrames)).find((f) => f.type === "prompt");
   assert.ok(prompt, "prompt frame sent");
   assert.match(prompt.text, /原始提问内容/);
 
-  await page.locator('.entry.user button[aria-label="编辑重发"]').first().click();
+  await longPress(page, page.locator(".entry.user").first());
+  await page.locator('.bottom-sheet .list-row:has-text("编辑重发")').click();
   await page.waitForTimeout(120);
   assert.equal(await page.inputValue("#prompt"), "原始提问内容");
 });
@@ -424,7 +436,8 @@ test("commands carry a commandId and stop resending after ACK", async (t) => {
   });
   await page.getByText("ACK 测试内容").first().waitFor();
   await page.evaluate(() => window.__closeMockSockets());
-  await page.locator('.entry.user button[aria-label="重试"]').first().click();
+  await longPress(page, page.locator(".entry.user").first());
+  await page.locator('.bottom-sheet .list-row:has-text("重试")').click();
   await page.evaluate(() => document.querySelector("#connect")?.click());
   await page.waitForFunction(() => (window.__sentFrames || []).some((f) => f.type === "prompt" && f.commandId), null, { timeout: 8000 });
   const cmdId = await page.evaluate(() => (window.__sentFrames.find((f) => f.type === "prompt") || {}).commandId);
@@ -475,10 +488,9 @@ test("queues a send while disconnected and flushes it on reconnect", async (t) =
   });
   await page.getByText("离线提问内容").first().waitFor();
   await page.evaluate(() => window.__closeMockSockets());
-  await page.locator('.entry.user button[aria-label="重试"]').first().click();
+  await longPress(page, page.locator(".entry.user").first());
+  await page.locator('.bottom-sheet .list-row:has-text("重试")').click();
   // Force a reconnect (the timer waits for the page to be visible).
-  // Force a reconnect via the (mobile-hidden) connect handler; the timer waits
-  // for the page to be visible.
   await page.evaluate(() => document.querySelector("#connect")?.click());
   await page.waitForFunction(
     () => (window.__sentFrames || []).some((f) => f.type === "prompt" && /离线提问内容/.test(f.text || "")),
@@ -515,6 +527,8 @@ test("in-thread search filters messages and shows a count", async (t) => {
   });
   await page.getByText("alpha 唯一词").first().waitFor();
   assert.equal(await page.locator("#log .entry.assistant").count(), 2);
+  await page.click("#searchButton2");
+  await page.waitForSelector("#messageSearch");
   await page.fill("#messageSearch", "唯一词");
   await page.waitForTimeout(200);
   assert.equal(await page.locator("#log .entry.assistant").count(), 1);

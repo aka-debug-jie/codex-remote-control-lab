@@ -1,0 +1,155 @@
+/* =================================================================
+ * MD3 design tokens + liquid-glass material.
+ * Two themes only: light / dark (data-theme on <html>).
+ * The theme preference (system|light|dark) lives in data-theme-pref.
+ * ================================================================= */
+
+:root {
+  /* --- brand seed (indigo / cyan accent, matches the Codex mark) --- */
+  --seed: 232;
+
+  /* type scale */
+  --font-sans: -apple-system, "Roboto", "Noto Sans SC", "PingFang SC",
+    "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", "Roboto Mono", ui-monospace,
+    Menlo, Consolas, monospace;
+
+  --text-display: 1.75rem;
+  --text-headline: 1.375rem;
+  --text-title: 1.0625rem;
+  --text-body: 0.95rem;
+  --text-label: 0.8125rem;
+  --text-caption: 0.75rem;
+
+  /* shape */
+  --shape-xs: 8px;
+  --shape-sm: 12px;
+  --shape-md: 16px;
+  --shape-lg: 22px;
+  --shape-xl: 28px;
+  --shape-full: 999px;
+
+  /* spacing */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+
+  /* motion — MD3 emphasized curves */
+  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --dur-short: 160ms;
+  --dur-medium: 280ms;
+  --dur-long: 420ms;
+
+  --touch: 48px;
+}
+
+/* ---------------------------- light --------------------------------- */
+:root[data-theme="light"] {
+  --primary: #4a5bd6;
+  --on-primary: #ffffff;
+  --primary-container: #dfe0ff;
+  --on-primary-container: #00105c;
+  --secondary: #5b5d72;
+  --on-secondary: #ffffff;
+  --secondary-container: #e0e1f9;
+  --on-secondary-container: #181a2c;
+  --tertiary: #2f8a86;
+  --on-tertiary: #ffffff;
+  --error: #ba1a1a;
+  --on-error: #ffffff;
+  --error-container: #ffdad6;
+  --on-error-container: #410002;
+
+  --surface: #fbfaff;
+  --surface-dim: #f1f0f7;
+  --surface-bright: #fbfaff;
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #f6f5fc;
+  --surface-container: #f0eff7;
+  --surface-container-high: #eae9f2;
+  --surface-container-highest: #e4e3ed;
+  --on-surface: #1b1b21;
+  --on-surface-variant: #46464f;
+  --outline: #767680;
+  --outline-variant: #c7c5d0;
+  --scrim: rgba(0, 0, 0, 0.32);
+
+  --success: #2e7d32;
+  --warning: #b26a00;
+
+  /* liquid glass */
+  --glass-bg: rgba(255, 255, 255, 0.62);
+  --glass-bg-strong: rgba(255, 255, 255, 0.78);
+  --glass-border: rgba(255, 255, 255, 0.9);
+  --glass-shadow: 0 8px 30px rgba(30, 34, 60, 0.12);
+  --glass-highlight: rgba(255, 255, 255, 0.75);
+
+  --ambient-1: rgba(120, 140, 255, 0.3);
+  --ambient-2: rgba(90, 220, 210, 0.22);
+  --ambient-3: rgba(255, 180, 220, 0.2);
+
+  --code-bg: rgba(20, 22, 34, 0.06);
+  --bubble-user: var(--primary-container);
+  --bubble-user-text: var(--on-primary-container);
+}
+
+/* ----------------------------- dark --------------------------------- */
+:root[data-theme="dark"] {
+  --primary: #bcc2ff;
+  --on-primary: #0f1a6b;
+  --primary-container: #2c3a92;
+  --on-primary-container: #dfe0ff;
+  --secondary: #c4c5dd;
+  --on-secondary: #2d2f42;
+  --secondary-container: #43455a;
+  --on-secondary-container: #e0e1f9;
+  --tertiary: #8fd4cf;
+  --on-tertiary: #003734;
+  --error: #ffb4ab;
+  --on-error: #690005;
+  --error-container: #93000a;
+  --on-error-container: #ffdad6;
+
+  --surface: #0e1116;
+  --surface-dim: #0a0d12;
+  --surface-bright: #343843;
+  --surface-container-lowest: #090b0f;
+  --surface-container-low: #15181f;
+  --surface-container: #1a1e26;
+  --surface-container-high: #242833;
+  --surface-container-highest: #2f333f;
+  --on-surface: #e4e6ee;
+  --on-surface-variant: #c6c8d2;
+  --outline: #8f919c;
+  --outline-variant: #3f434f;
+  --scrim: rgba(0, 0, 0, 0.6);
+
+  --success: #7ad07e;
+  --warning: #f3b34c;
+
+  /* liquid glass */
+  --glass-bg: rgba(24, 28, 38, 0.58);
+  --glass-bg-strong: rgba(20, 24, 33, 0.78);
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --glass-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  --glass-highlight: rgba(255, 255, 255, 0.18);
+
+  --ambient-1: rgba(90, 110, 255, 0.32);
+  --ambient-2: rgba(50, 190, 190, 0.2);
+  --ambient-3: rgba(180, 90, 200, 0.18);
+
+  --code-bg: rgba(255, 255, 255, 0.06);
+  --bubble-user: var(--primary-container);
+  --bubble-user-text: var(--on-primary-container);
+}
+
+:root {
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
