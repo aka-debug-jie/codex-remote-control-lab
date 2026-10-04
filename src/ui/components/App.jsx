@@ -153,15 +153,27 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    api.info().catch(() => {});
-    loadThreads();
-    loadArtifacts();
+    let cancelled = false;
     const cached = loadCachedMessages(initialThread);
     if (cached && cached.length) {
       store.dispatch({ type: "messages.restore", threadId: initialThread, messages: cached });
     }
-    connection.connect(initialThread);
-    return () => connection.close();
+    // Exchange the URL token for a session cookie before opening the socket, so
+    // the token can be stripped from the address bar right away.
+    api
+      .auth()
+      .catch(() => {})
+      .then(() => {
+        if (cancelled) return;
+        api.info().catch(() => {});
+        loadThreads();
+        loadArtifacts();
+        connection.connect(initialThread);
+      });
+    return () => {
+      cancelled = true;
+      connection.close();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

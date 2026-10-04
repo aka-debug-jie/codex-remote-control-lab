@@ -104,6 +104,7 @@ if (!tokenRequired && !debugLan && !isLoopbackHost(listenHost)) {
   listenHost = "127.0.0.1";
 }
 const tokenPath = path.join(root, ".phone-token");
+const sessionPath = process.env.PHONE_SESSION_FILE || path.join(root, ".phone-session");
 const rateLimitCacheTtlMs = positiveNumber(process.env.PHONE_RATE_LIMIT_CACHE_TTL_MS, 5 * 60 * 1000);
 const rateLimitRefreshTimeoutMs = positiveNumber(process.env.PHONE_RATE_LIMIT_REFRESH_TIMEOUT_MS, 6000);
 const uploadDir = path.join(root, ".uploads");
@@ -147,6 +148,7 @@ async function refreshWorkspaceMeta() {
 
 const { makeStaticServer } = require("./static-serve");
 const { pickEncoding, compress } = require("./http-compress");
+const { createSessionAuth } = require("./session-auth");
 const serveStatic = makeStaticServer({ publicRoot: path.join(root, "public") });
 
 // Only compress JSON above this size; the upper bound keeps the synchronous
@@ -161,6 +163,9 @@ function getToken() {
   fs.writeFileSync(tokenPath, `${token}\n`, { mode: 0o600 });
   return token;
 }
+
+const phoneToken = tokenRequired ? getToken() : "";
+const sessionAuth = createSessionAuth({ token: phoneToken, persistedPath: sessionPath });
 
 function lanAddresses() {
   return Object.values(os.networkInterfaces())
@@ -803,11 +808,52 @@ function queryProvider(req, url, res) {
   }
 }
 
-function requireToken(req, url, phoneToken, res) {
+// Auth accepts either the raw bridge token (query param) or the HttpOnly
+// session cookie issued by POST /api/auth. Both paths are constant-time.
+function isAuthorized(req, url) {
   if (!tokenRequired) return true;
-  if (url.searchParams.get("token") === phoneToken) return true;
+  if (sessionAuth.tokenMatches(url.searchParams.get("token"))) return true;
+  return sessionAuth.cookieMatches(req);
+}
+
+function requireToken(req, url, phoneToken, res) {
+  if (isAuthorized(req, url)) return true;
   sendJson(req, res, 401, { error: "invalid token" });
   return false;
+}
+
+function readJsonBody(req, limit = 64 * 1024) {
+  return new Promise((resolve) => {
+    let size = 0;
+    const chunks = [];
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      resolve(value);
+    };
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > limit) {
+        finish(null);
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (!chunks.length) {
+        finish({});
+        return;
+      }
+      try {
+        finish(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      } catch {
+        finish(null);
+      }
+    });
+    req.on("error", () => finish(null));
+  });
 }
 
 function safePathWithin(base, input) {
@@ -2358,7 +2404,7 @@ function getBridge(threadId, connectionId = crypto.randomUUID()) {
   return bridges.get(key);
 }
 
-function bindBrowser(browser, phoneToken, threadId) {
+function bindBrowser(browser, phoneToken, threadId, cookieAuthorized = false) {
   const bridge = getBridge(threadId);
   bridge.addClient(browser);
 
@@ -2369,7 +2415,9 @@ function bindBrowser(browser, phoneToken, threadId) {
     } catch {
       return; // malformed frame only affects this client
     }
-    if (tokenRequired && msg.token !== phoneToken) {
+    // A cookie-authenticated socket was already vetted at upgrade time and has
+    // no token to attach, so skip the per-frame credential check for it.
+    if (tokenRequired && !cookieAuthorized && msg.token !== phoneToken) {
       bridge.emitTo(browser, "error", { text: "Invalid token" });
       browser.close();
       return;
@@ -2404,7 +2452,6 @@ function bindBrowser(browser, phoneToken, threadId) {
 }
 
 async function main() {
-  const phoneToken = tokenRequired ? getToken() : "";
   const codex = shouldStartCodexServer ? startCodexServer() : null;
   if (shouldStartCodexServer) {
     await waitForReady();
@@ -2419,8 +2466,42 @@ async function main() {
       sendJson(req, res, 400, { error: "bad request" });
       return;
     }
+    if (url.pathname === "/api/auth") {
+      // Exchange the bridge token for an HttpOnly session cookie. The token is
+      // accepted from the body, the query string, or the X-Codex-Token header so
+      // both the web app and curl/CLI clients can use this endpoint.
+      // CSRF guard: a cross-site form can never set a custom header, so any
+      // session-changing request must carry X-Codex-Client. SameSite=Strict
+      // already keeps ambient cookies out; this closes login-CSRF too.
+      if (req.headers["x-codex-client"] !== "1") {
+        sendJson(req, res, 403, { error: "missing X-Codex-Client" });
+        return;
+      }
+      if (!tokenRequired) {
+        sendJson(req, res, 200, { ok: true, tokenRequired: false });
+        return;
+      }
+      if (req.method === "DELETE") {
+        res.setHeader("Set-Cookie", sessionAuth.clearCookieHeader());
+        sendJson(req, res, 200, { ok: true });
+        return;
+      }
+      const body = await readJsonBody(req);
+      const candidate =
+        (body && typeof body.token === "string" && body.token) ||
+        url.searchParams.get("token") ||
+        req.headers["x-codex-token"] ||
+        "";
+      if (!sessionAuth.tokenMatches(candidate)) {
+        sendJson(req, res, 401, { error: "invalid token" });
+        return;
+      }
+      res.setHeader("Set-Cookie", sessionAuth.setCookieHeader());
+      sendJson(req, res, 200, { ok: true, tokenRequired: true });
+      return;
+    }
     if (url.pathname === "/api/info") {
-      const authed = !tokenRequired || url.searchParams.get("token") === phoneToken;
+      const authed = isAuthorized(req, url);
       sendJson(req, res, 200, {
         provider: agentProvider,
         model,
@@ -2734,13 +2815,14 @@ async function main() {
         socket.destroy();
         return;
       }
-      if (tokenRequired && url.searchParams.get("token") !== phoneToken) {
+      if (!isAuthorized(req, url)) {
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();
         return;
       }
       const threadId = url.searchParams.get("thread") || null;
-      wss.handleUpgrade(req, socket, head, (ws) => bindBrowser(ws, phoneToken, threadId));
+      const cookieAuthorized = sessionAuth.cookieMatches(req);
+      wss.handleUpgrade(req, socket, head, (ws) => bindBrowser(ws, phoneToken, threadId, cookieAuthorized));
     } catch {
       socket.destroy();
     }

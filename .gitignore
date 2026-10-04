@@ -17,6 +17,7 @@ tmp/
 !.env.example
 
 # local credentials / session data
+.phone-session
 .phone-token.bak
 *.bak
 auth.json

@@ -1,7 +1,7 @@
 // WebSocket connection manager: reconnect w/ backoff, heartbeat, gap resync,
 // and rAF-coalesced streaming deltas.
 
-import { token } from "./api.js";
+import { getToken, isCookieReady } from "./api.js";
 
 export function createConnection(store, { onThreadChange } = {}) {
   let ws = null;
@@ -24,7 +24,10 @@ export function createConnection(store, { onThreadChange } = {}) {
   }
 
   function wire(payload) {
-    return JSON.stringify({ token, ...payload });
+    // Only attach the raw token while cookie auth is not yet active; once the
+    // session cookie exists the socket is authenticated at upgrade time.
+    if (!isCookieReady() && getToken()) return JSON.stringify({ token: getToken(), ...payload });
+    return JSON.stringify(payload);
   }
 
   function send(payload) {
@@ -114,7 +117,7 @@ export function createConnection(store, { onThreadChange } = {}) {
     heartbeatTimer = setInterval(() => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       try {
-        ws.send(JSON.stringify({ type: "ping", token }));
+        ws.send(wire({ type: "ping" }));
       } catch {
         return;
       }
@@ -182,7 +185,7 @@ export function createConnection(store, { onThreadChange } = {}) {
     deltaBuffer = new Map();
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const query = new URLSearchParams();
-    if (token) query.set("token", token);
+    if (!isCookieReady() && getToken()) query.set("token", getToken());
     if (threadId) query.set("thread", threadId);
     const url = `${proto}//${location.host}/bridge${query.toString() ? `?${query}` : ""}`;
     const socket = new WebSocket(url);

@@ -8,7 +8,9 @@ const outDir = path.join(root, "public");
 
 // The bridge listens on the host; in dev we proxy the REST + WebSocket
 // surface so `npm run dev:ui` can hot-reload against the real backend.
-const bridgeTarget = process.env.PHONE_DEV_PROXY || "http://100.108.139.80:45214";
+// Set PHONE_DEV_PROXY to your own bridge origin (host:port); default is the
+// conventional local bridge address.
+const bridgeTarget = process.env.PHONE_DEV_PROXY || "http://127.0.0.1:45214";
 
 export default defineConfig({
   root: uiRoot,

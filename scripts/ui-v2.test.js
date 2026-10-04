@@ -54,6 +54,7 @@ async function mockApi(page, state = {}) {
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     const respond = (json) => route.fulfill({ json });
+    if (url.pathname === "/api/auth") return route.fulfill({ status: 200, json: { ok: true, tokenRequired: true } });
     if (url.pathname === "/api/info") return respond({ tokenRequired: true, authMode: "token" });
     if (url.pathname === "/api/artifacts") return respond({ data: state.artifacts || [], artifacts: state.artifacts || [] });
     if (url.pathname === "/api/threads") return respond({ data: state.threads || [], threads: state.threads || [] });
