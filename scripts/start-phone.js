@@ -146,7 +146,13 @@ async function refreshWorkspaceMeta() {
 }
 
 const { makeStaticServer } = require("./static-serve");
+const { pickEncoding, compress } = require("./http-compress");
 const serveStatic = makeStaticServer({ publicRoot: path.join(root, "public") });
+
+// Only compress JSON above this size; the upper bound keeps the synchronous
+// zlib call off the hot path for unusually large payloads.
+const JSON_COMPRESS_MIN = 1024;
+const JSON_COMPRESS_MAX = 2 * 1024 * 1024;
 
 function getToken() {
   if (process.env.PHONE_TOKEN) return process.env.PHONE_TOKEN;
@@ -619,19 +625,34 @@ function appServerRequest(method, params) {
   return appServerClient.request(method, params);
 }
 
-function sendJson(res, status, body) {
-  res.writeHead(status, {
+function sendJson(req, res, status, body) {
+  const text = JSON.stringify(body);
+  const headers = {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
-  });
-  res.end(JSON.stringify(body));
+  };
+  if (text.length >= JSON_COMPRESS_MIN) {
+    const encoding = pickEncoding(req.headers["accept-encoding"]);
+    if (encoding && text.length < JSON_COMPRESS_MAX) {
+      const compressed = compress(Buffer.from(text, "utf8"), encoding);
+      headers["content-encoding"] = encoding;
+      headers.vary = "accept-encoding";
+      headers["content-length"] = compressed.length;
+      res.writeHead(status, headers);
+      res.end(compressed);
+      return;
+    }
+  }
+  headers["content-length"] = Buffer.byteLength(text);
+  res.writeHead(status, headers);
+  res.end(text);
 }
 
-function sendThreadHistory(res, { provider, threadId, history, sinceRev, extra = {} }) {
+function sendThreadHistory(req, res, { provider, threadId, history, sinceRev, extra = {} }) {
   const entries = Array.isArray(history) ? history : [];
   const rev = historyRevision(entries);
   if (sinceRev && sinceRev === rev) {
-    sendJson(res, 200, {
+    sendJson(req, res, 200, {
       ...extra,
       provider,
       activeProvider: agentProvider,
@@ -642,7 +663,7 @@ function sendThreadHistory(res, { provider, threadId, history, sinceRev, extra =
     });
     return;
   }
-  sendJson(res, 200, { ...extra, provider, activeProvider: agentProvider, threadId, rev, history: entries });
+  sendJson(req, res, 200, { ...extra, provider, activeProvider: agentProvider, threadId, rev, history: entries });
 }
 
 function broadcastThreadUpdated(threadId, rev = null) {
@@ -773,19 +794,19 @@ function mergeSkillEntries(...entryLists) {
   return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function queryProvider(url, res) {
+function queryProvider(req, url, res) {
   try {
     return normalizeProvider(url.searchParams.get("provider") || agentProvider);
   } catch (error) {
-    sendJson(res, 400, { error: error.message });
+    sendJson(req, res, 400, { error: error.message });
     return null;
   }
 }
 
-function requireToken(url, phoneToken, res) {
+function requireToken(req, url, phoneToken, res) {
   if (!tokenRequired) return true;
   if (url.searchParams.get("token") === phoneToken) return true;
-  sendJson(res, 401, { error: "invalid token" });
+  sendJson(req, res, 401, { error: "invalid token" });
   return false;
 }
 
@@ -2395,12 +2416,12 @@ async function main() {
     try {
     const url = requestUrl(req);
     if (!url) {
-      sendJson(res, 400, { error: "bad request" });
+      sendJson(req, res, 400, { error: "bad request" });
       return;
     }
     if (url.pathname === "/api/info") {
       const authed = !tokenRequired || url.searchParams.get("token") === phoneToken;
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         provider: agentProvider,
         model,
         managedCodexServer: shouldStartCodexServer,
@@ -2418,11 +2439,11 @@ async function main() {
       return;
     }
     if (url.pathname === "/api/threads") {
-      if (!requireToken(url, phoneToken, res)) return;
-      const requestedProvider = queryProvider(url, res);
+      if (!requireToken(req, url, phoneToken, res)) return;
+      const requestedProvider = queryProvider(req, url, res);
       if (!requestedProvider) return;
       if (requestedProvider === "claude") {
-        sendJson(res, 200, await claudeThreadListPayload());
+        sendJson(req, res, 200, await claudeThreadListPayload());
         return;
       }
       try {
@@ -2433,68 +2454,68 @@ async function main() {
           archived: false,
           useStateDbOnly: true,
         });
-        sendJson(res, 200, { ...result, provider: requestedProvider, activeProvider: agentProvider });
+        sendJson(req, res, 200, { ...result, provider: requestedProvider, activeProvider: agentProvider });
       } catch (error) {
         if (requestedProvider !== agentProvider) {
-          sendJson(res, 200, { provider: requestedProvider, activeProvider: agentProvider, data: [], unavailable: error.message });
+          sendJson(req, res, 200, { provider: requestedProvider, activeProvider: agentProvider, data: [], unavailable: error.message });
           return;
         }
-        sendJson(res, 500, { error: error.message });
+        sendJson(req, res, 500, { error: error.message });
       }
       return;
     }
     if (url.pathname === "/api/models") {
-      if (!requireToken(url, phoneToken, res)) return;
+      if (!requireToken(req, url, phoneToken, res)) return;
       if (isClaudeProvider) {
-        sendJson(res, 200, {
+        sendJson(req, res, 200, {
           data: modelOptions.map((item) => ({ id: item, model: item, displayName: item })),
         });
         return;
       }
       try {
         const result = await appServerRequest("model/list", { limit: 80, includeHidden: false });
-        sendJson(res, 200, result);
+        sendJson(req, res, 200, result);
       } catch (error) {
-        sendJson(res, 500, { error: error.message });
+        sendJson(req, res, 500, { error: error.message });
       }
       return;
     }
     if (url.pathname === "/api/plugins") {
-      if (!requireToken(url, phoneToken, res)) return;
+      if (!requireToken(req, url, phoneToken, res)) return;
       if (isClaudeProvider) {
-        sendJson(res, 200, { data: [] });
+        sendJson(req, res, 200, { data: [] });
         return;
       }
       try {
         const result = await appServerRequest("plugin/list", { cwds: [workdir] });
-        sendJson(res, 200, result);
+        sendJson(req, res, 200, result);
       } catch (error) {
-        sendJson(res, 500, { error: error.message });
+        sendJson(req, res, 500, { error: error.message });
       }
       return;
     }
     if (url.pathname === "/api/skills") {
-      if (!requireToken(url, phoneToken, res)) return;
+      if (!requireToken(req, url, phoneToken, res)) return;
       if (isClaudeProvider) {
-        sendJson(res, 200, { data: [] });
+        sendJson(req, res, 200, { data: [] });
         return;
       }
       try {
         const result = await appServerRequest("plugin/list", { cwds: [workdir] });
         const marketplaces = result.marketplaces || result.data || [];
-        sendJson(res, 200, {
+        sendJson(req, res, 200, {
           data: mergeSkillEntries(installedSkillsFromPluginMarketplaces(marketplaces), installedLocalSkillEntries()),
           marketplaces,
         });
       } catch (error) {
-        sendJson(res, 500, { error: error.message });
+        sendJson(req, res, 500, { error: error.message });
       }
       return;
     }
     if (url.pathname === "/api/config") {
-      if (!requireToken(url, phoneToken, res)) return;
+      if (!requireToken(req, url, phoneToken, res)) return;
       if (isClaudeProvider) {
-        sendJson(res, 200, {
+        sendJson(req, res, 200, {
           config: { config: { model, cwd: workdir, provider: agentProvider } },
           auth: { authMethod: "claude-cli" },
           errors: [],
@@ -2506,7 +2527,7 @@ async function main() {
           appServerRequest("config/read", { includeLayers: false, cwd: workdir }),
           appServerRequest("getAuthStatus", {}),
         ]);
-        sendJson(res, 200, {
+        sendJson(req, res, 200, {
           config: config.status === "fulfilled" ? config.value : null,
           auth: auth.status === "fulfilled" ? auth.value : null,
           errors: [config, auth]
@@ -2514,15 +2535,15 @@ async function main() {
             .map((result) => result.reason.message),
         });
       } catch (error) {
-        sendJson(res, 500, { error: error.message });
+        sendJson(req, res, 500, { error: error.message });
       }
       return;
     }
     if (url.pathname === "/api/status") {
-      if (!requireToken(url, phoneToken, res)) return;
+      if (!requireToken(req, url, phoneToken, res)) return;
       const workspaceMeta = await refreshWorkspaceMeta();
       const refreshRateLimits = url.searchParams.get("refreshRateLimits") === "1";
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         provider: agentProvider,
         workdir,
         ...workspaceMeta,
@@ -2546,14 +2567,14 @@ async function main() {
       return;
     }
     if (url.pathname === "/api/history-sync") {
-      if (!requireToken(url, phoneToken, res)) return;
+      if (!requireToken(req, url, phoneToken, res)) return;
       if (isClaudeProvider) {
-        sendJson(res, 200, { skipped: true, reason: "history sync is only available for the Codex provider" });
+        sendJson(req, res, 200, { skipped: true, reason: "history sync is only available for the Codex provider" });
         return;
       }
       const threadId = url.searchParams.get("thread");
       if (!threadId) {
-        sendJson(res, 400, { error: "thread is required" });
+        sendJson(req, res, 400, { error: "thread is required" });
         return;
       }
       try {
@@ -2563,24 +2584,24 @@ async function main() {
           request: appServerRequest,
           enabled: historySyncEnabled,
         });
-        sendJson(res, 200, result);
+        sendJson(req, res, 200, result);
       } catch (error) {
-        sendJson(res, 500, { error: error.message });
+        sendJson(req, res, 500, { error: error.message });
       }
       return;
     }
     if (url.pathname === "/api/thread") {
-      if (!requireToken(url, phoneToken, res)) return;
+      if (!requireToken(req, url, phoneToken, res)) return;
       const threadId = url.searchParams.get("thread");
-      const requestedProvider = queryProvider(url, res);
+      const requestedProvider = queryProvider(req, url, res);
       if (!requestedProvider) return;
       if (!threadId) {
-        sendJson(res, 400, { error: "thread is required" });
+        sendJson(req, res, 400, { error: "thread is required" });
         return;
       }
       if (requestedProvider === "claude") {
         const bridge = Array.from(bridges.values()).find((item) => item.threadId === threadId || item.bridgeKey === threadId);
-        sendThreadHistory(res, {
+        sendThreadHistory(req, res, {
           provider: requestedProvider,
           threadId,
           history: bridge?.history?.length ? bridge.history : claudeHistoryForSession(threadId),
@@ -2597,7 +2618,7 @@ async function main() {
           workdir,
           historyFromThread,
         });
-        sendThreadHistory(res, {
+        sendThreadHistory(req, res, {
           provider: requestedProvider,
           threadId: snapshot.threadId || threadId,
           history: snapshot.history,
@@ -2606,51 +2627,51 @@ async function main() {
         });
       } catch (error) {
         if (requestedProvider !== agentProvider) {
-          sendJson(res, 200, { provider: requestedProvider, activeProvider: agentProvider, threadId, history: [], unavailable: error.message });
+          sendJson(req, res, 200, { provider: requestedProvider, activeProvider: agentProvider, threadId, history: [], unavailable: error.message });
           return;
         }
-        sendJson(res, 500, { error: error.message });
+        sendJson(req, res, 500, { error: error.message });
       }
       return;
     }
     if (url.pathname === "/api/automations") {
-      if (!requireToken(url, phoneToken, res)) return;
-      sendJson(res, 200, { data: readAutomations() });
+      if (!requireToken(req, url, phoneToken, res)) return;
+      sendJson(req, res, 200, { data: readAutomations() });
       return;
     }
     if (url.pathname === "/api/artifacts") {
-      if (!requireToken(url, phoneToken, res)) return;
-      sendJson(res, 200, { data: discoverArtifacts() });
+      if (!requireToken(req, url, phoneToken, res)) return;
+      sendJson(req, res, 200, { data: discoverArtifacts() });
       return;
     }
     if (url.pathname === "/api/workspace") {
-      if (!requireToken(url, phoneToken, res)) return;
+      if (!requireToken(req, url, phoneToken, res)) return;
       try {
-        sendJson(res, 200, {
+        sendJson(req, res, 200, {
           data: await discoverWorkspaceEntries({
             limit: Number(url.searchParams.get("limit") || 200),
             query: url.searchParams.get("q") || "",
           }),
         });
       } catch (error) {
-        sendJson(res, 500, { error: error.message });
+        sendJson(req, res, 500, { error: error.message });
       }
       return;
     }
     if (url.pathname === "/api/review") {
-      if (!requireToken(url, phoneToken, res)) return;
+      if (!requireToken(req, url, phoneToken, res)) return;
       try {
-        sendJson(res, 200, await reviewSummary());
+        sendJson(req, res, 200, await reviewSummary());
       } catch (error) {
-        sendJson(res, 500, { error: error.message });
+        sendJson(req, res, 500, { error: error.message });
       }
       return;
     }
     if (url.pathname === "/api/uploaded") {
-      if (!requireToken(url, phoneToken, res)) return;
+      if (!requireToken(req, url, phoneToken, res)) return;
       const target = safeUploadPath(url.searchParams.get("name"));
       if (!target || !fs.existsSync(target) || !fs.statSync(target).isFile() || !isImagePath(target)) {
-        sendJson(res, 404, { error: "image not found" });
+        sendJson(req, res, 404, { error: "image not found" });
         return;
       }
       res.writeHead(200, { "content-type": mimeForPath(target), "cache-control": "no-store" });
@@ -2658,10 +2679,10 @@ async function main() {
       return;
     }
     if (url.pathname === "/api/file/raw") {
-      if (!requireToken(url, phoneToken, res)) return;
+      if (!requireToken(req, url, phoneToken, res)) return;
       const target = safeOpenPath(url.searchParams.get("path"));
       if (!target || !fs.existsSync(target) || !fs.statSync(target).isFile() || !isImagePath(target)) {
-        sendJson(res, 404, { error: "image not found" });
+        sendJson(req, res, 404, { error: "image not found" });
         return;
       }
       res.writeHead(200, { "content-type": mimeForPath(target), "cache-control": "no-store" });
@@ -2669,14 +2690,14 @@ async function main() {
       return;
     }
     if (url.pathname === "/api/file") {
-      if (!requireToken(url, phoneToken, res)) return;
+      if (!requireToken(req, url, phoneToken, res)) return;
       const target = safeOpenPath(url.searchParams.get("path"));
       if (!target || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
-        sendJson(res, 404, { error: "file not found" });
+        sendJson(req, res, 404, { error: "file not found" });
         return;
       }
       if (isImagePath(target)) {
-        sendJson(res, 200, {
+        sendJson(req, res, 200, {
           path: relativeDisplayPath(target),
           kind: "image",
           mimeType: mimeForPath(target),
@@ -2684,7 +2705,7 @@ async function main() {
         });
         return;
       }
-      sendJson(res, 200, {
+      sendJson(req, res, 200, {
         path: relativeDisplayPath(target),
         kind: /\.md(?:own)?$/i.test(target) ? "markdown" : "text",
         text: fs.readFileSync(target, "utf8").slice(0, 80_000),
@@ -2694,7 +2715,7 @@ async function main() {
     serveStatic(req, res);
     } catch (error) {
       try {
-        if (!res.headersSent) sendJson(res, 500, { error: error.message });
+        if (!res.headersSent) sendJson(req, res, 500, { error: error.message });
         else res.end();
       } catch {
         /* ignore */

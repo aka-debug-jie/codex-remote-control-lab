@@ -12,11 +12,44 @@ export function BottomSheet({ open, onClose, title, children, labelledBy }) {
       setDragY(0);
       return undefined;
     }
+    const sheet = sheetRef.current;
+    const previouslyFocused = document.activeElement;
+    // Move focus into the sheet and trap Tab within it while open.
+    const focusables = () =>
+      sheet
+        ? [...sheet.querySelectorAll('a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])')].filter(
+            (el) => el.offsetParent !== null,
+          )
+        : [];
+    const first = focusables()[0];
+    if (first) first.focus();
     const onKey = (e) => {
-      if (e.key === "Escape") onClose?.();
+      if (e.key === "Escape") {
+        onClose?.();
+        return;
+      }
+      if (e.key !== "Tab" || !sheet) return;
+      const items = focusables();
+      if (!items.length) return;
+      const firstEl = items[0];
+      const lastEl = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === firstEl) {
+        e.preventDefault();
+        lastEl.focus();
+      } else if (!e.shiftKey && document.activeElement === lastEl) {
+        e.preventDefault();
+        firstEl.focus();
+      }
     };
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      try {
+        previouslyFocused && previouslyFocused.focus();
+      } catch {
+        /* ignore */
+      }
+    };
   }, [open, onClose]);
 
   const startDrag = (e) => {

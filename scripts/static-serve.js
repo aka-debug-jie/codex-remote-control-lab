@@ -8,7 +8,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const zlib = require("zlib");
+const { pickEncoding, compress, MIN_COMPRESS } = require("./http-compress");
 
 const MIME_TYPES = new Map([
   [".css", "text/css"],
@@ -30,7 +30,6 @@ const MIME_TYPES = new Map([
 ]);
 
 const TEXT_EXT = new Set([".css", ".html", ".js", ".mjs", ".json", ".svg", ".webmanifest", ".txt", ".map"]);
-const MIN_COMPRESS = 1024;
 
 // sha256 of the inline theme-bootstrap <script> in src/ui/index.html.
 // If that snippet changes, update this hash (a failing CSP shows a console
@@ -68,21 +67,9 @@ function cacheControlFor(requestPath) {
   return "no-cache";
 }
 
-function pickEncoding(acceptEncoding, ext) {
+function pickStaticEncoding(acceptEncoding, ext) {
   if (!TEXT_EXT.has(ext)) return null;
-  const header = String(acceptEncoding || "").toLowerCase();
-  if (header.includes("br")) return "br";
-  if (header.includes("gzip")) return "gzip";
-  return null;
-}
-
-function compress(buffer, encoding) {
-  if (encoding === "br") {
-    return zlib.brotliCompressSync(buffer, {
-      params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 },
-    });
-  }
-  return zlib.gzipSync(buffer, { level: 6 });
+  return pickEncoding(acceptEncoding);
 }
 
 function makeStaticServer({ publicRoot, extraHeaders } = {}) {
@@ -135,7 +122,7 @@ function makeStaticServer({ publicRoot, extraHeaders } = {}) {
       return;
     }
 
-    const encoding = pickEncoding(req.headers["accept-encoding"], ext);
+    const encoding = pickStaticEncoding(req.headers["accept-encoding"], ext);
     const baseHeaders = {
       "content-type": `${type}; charset=utf-8`,
       "cache-control": cacheControl,
@@ -176,7 +163,7 @@ module.exports = {
   makeStaticServer,
   securityHeaders,
   cacheControlFor,
-  pickEncoding,
+  pickEncoding: pickStaticEncoding,
   MIME_TYPES,
   THEME_BOOTSTRAP_HASH,
 };

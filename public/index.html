@@ -14,6 +14,44 @@
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
     <link rel="manifest" href="site.webmanifest" />
     <meta name="theme-color" content="#0e1116" />
+    <style>
+      /* Critical inline CSS: covers the first paint (background + shell
+         skeleton) before the bundled stylesheet loads. Kept tiny; the real
+         design system lives in styles/app.css. */
+      :root {
+        color-scheme: dark;
+        --critical-surface: #0e1116;
+        --critical-on: #e4e6ee;
+      }
+      :root[data-theme="light"] {
+        color-scheme: light;
+        --critical-surface: #fbfaff;
+        --critical-on: #1b1b21;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--critical-surface);
+        color: var(--critical-on);
+        font-family: -apple-system, "Roboto", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      }
+      body {
+        overscroll-behavior-y: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      #root {
+        height: 100%;
+      }
+      .app-shell {
+        height: 100%;
+        background: var(--critical-surface);
+      }
+      .top-app-bar {
+        min-height: 56px;
+        background: var(--critical-surface);
+      }
+    </style>
     <script>
       (function () {
         try {
@@ -31,8 +69,8 @@
         }
       })();
     </script>
-    <script type="module" crossorigin src="/assets/app-C8j0q5TD.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/app-DmjmJLlb.css">
+    <script type="module" crossorigin src="/assets/app-LspY4cYU.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/app-C-p2sVde.css">
   </head>
   <body>
     <div id="root"></div>

@@ -142,7 +142,7 @@ export function MessageList({ onLongPress, searchQuery, onCount, onScrollToggle 
   return (
     <>
       <StatusGroup notices={notices} />
-      <div id="log" className="message-list" ref={scrollRef} onScroll={onScroll} aria-live="polite">
+      <div id="log" className="message-list" ref={scrollRef} onScroll={onScroll} role="log" aria-live="off" aria-label="会话消息">
         {hiddenCount > 0 ? (
           <button type="button" className="text-btn" onClick={() => setVisibleCount((c) => c + EXPAND_STEP)}>
             加载更早消息（{hiddenCount}）
