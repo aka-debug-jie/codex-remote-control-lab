@@ -2,9 +2,12 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icon.jsx";
 
 function formatRelativeTime(value) {
-  const ts = Number(value) || 0;
+  let ts = Number(value) || 0;
   if (!ts) return "";
+  // The bridge reports Unix time in seconds; normalize to milliseconds.
+  if (ts < 1e12) ts *= 1000;
   const delta = Date.now() - ts;
+  if (delta < 0) return "刚刚";
   if (delta < 60_000) return "刚刚";
   if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}分钟`;
   if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}小时`;

@@ -535,6 +535,24 @@ test("in-thread search filters messages and shows a count", async (t) => {
   assert.match(await page.locator(".message-search-count").innerText(), /1 条/);
 });
 
+test("native theme bridge overrides prefers-color-scheme for system pref", async (t) => {
+  const { page } = await boot(t);
+  // Default pref is system; the shell reports light.
+  await page.evaluate(() => window.__nativeSystemTheme("light"));
+  await page.waitForTimeout(100);
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), "light");
+  await page.evaluate(() => window.__nativeSystemTheme("dark"));
+  await page.waitForTimeout(100);
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), "dark");
+  // An explicit user pref must not be overridden by the native signal.
+  await page.evaluate(() => localStorage.setItem("codexPhoneTheme", "light"));
+  await page.reload({ waitUntil: "networkidle" });
+  await page.waitForSelector("#send");
+  await page.evaluate(() => window.__nativeSystemTheme("dark"));
+  await page.waitForTimeout(100);
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), "light");
+});
+
 test("composer grows with multi-line input", async (t) => {
   const { page } = await boot(t);
   const before = await page.locator("#prompt").evaluate((el) => el.getBoundingClientRect().height);

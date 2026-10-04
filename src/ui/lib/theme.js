@@ -18,11 +18,24 @@ export function loadPref() {
 
 export function resolveTheme(pref) {
   if (pref === "light" || pref === "dark") return pref;
+  // Preferred: the Android shell pushes the real system state because WebView's
+  // prefers-color-scheme follows the app theme, not the system override.
+  if (nativeSystem !== null) return nativeSystem;
   try {
     return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   } catch {
     return "dark";
   }
+}
+
+let nativeSystem = null;
+
+// Bridge hook the Android shell calls to report the system dark/light state.
+if (typeof window !== "undefined") {
+  window.__nativeSystemTheme = (theme) => {
+    nativeSystem = theme === "light" ? "light" : "dark";
+    if (loadPref() === "system") applyTheme("system");
+  };
 }
 
 function syncNative(theme) {
