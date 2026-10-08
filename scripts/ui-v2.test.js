@@ -158,6 +158,20 @@ async function boot(t, options = {}) {
   const page = await browser.newPage({ viewport: { width: 390, height: 900 }, deviceScaleFactor: 1 });
   const errors = [];
   page.on("pageerror", (error) => errors.push(String(error)));
+  // Record every fetch URL inside the page so tests can assert what was really
+  // requested (contract evidence rather than UI mock acceptance).
+  await page.addInitScript(() => {
+    window.__apiCalls = [];
+    const original = window.fetch;
+    window.fetch = (...args) => {
+      try {
+        window.__apiCalls.push(String(args[0]));
+      } catch {
+        /* ignore */
+      }
+      return original(...args);
+    };
+  });
   await mockApi(page, options.apiState || {});
   await mockWebSocket(page, options.ws || {});
   const threadParam = options.thread ? `&thread=${options.thread}` : "";
@@ -267,6 +281,36 @@ test("panels sheet tabs switch titles and theme selection keeps the sheet open",
   await options.nth(2).click();
   await page.waitForTimeout(200);
   assert.ok(await page.locator(".bottom-sheet.open").isVisible());
+});
+
+test("claude ready drives the provider everywhere: thread list source + approval buttons", async (t) => {
+  const { page } = await boot(t, {
+    ws: {
+      defaultReadyPayload: {
+        type: "ready",
+        provider: "claude",
+        threadId: "claude-main",
+        model: "sonnet",
+        clients: 1,
+        workdir: root,
+        run: { state: "ready", label: "空闲" },
+        history: [],
+      },
+    },
+  });
+  await page.waitForFunction(() => document.querySelector("#runState")?.dataset.state === "ready");
+  // The unified provider must be used for the thread list too.
+  await page.waitForFunction(
+    () => (window.__apiCalls || []).some((c) => c.startsWith("/api/threads") && c.includes("provider=claude")),
+    null,
+    { timeout: 8000 },
+  );
+  // Claude has no session-wide approval memory: no 始终允许 button.
+  await page.evaluate(() => {
+    window.__dispatchServerMessage({ type: "approval.requested", approvalId: 3, request: { id: 3, method: "x", params: {} }, seq: 5 });
+  });
+  await page.waitForSelector(".approval");
+  assert.equal(await page.locator('.approval button:has-text("始终允许")').count(), 0);
 });
 
 test("a slow earlier panel response never overwrites the newer panel", async (t) => {

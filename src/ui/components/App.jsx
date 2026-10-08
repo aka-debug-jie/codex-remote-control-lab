@@ -184,6 +184,41 @@ export function App() {
     }
   }, [provider]);
 
+  // The authoritative provider decides which thread source to read; reload the
+  // drawer list whenever readiness or the provider changes.
+  useEffect(() => {
+    if (!ready) return;
+    loadThreads();
+  }, [ready, provider, loadThreads]);
+
+  // Expired model check: a saved model that vanished from the provider's real
+  // directory must be surfaced ("请重新选择"), never silently sent.
+  const modelValidityRef = useRef(false);
+  useEffect(() => {
+    if (modelValidityRef.current) return;
+    if (provider !== "codex") return;
+    let cancelled = false;
+    api
+      .models()
+      .then((result) => {
+        if (cancelled || modelValidityRef.current) return;
+        const list = result.data || [];
+        if (!list.length) return;
+        modelValidityRef.current = true;
+        const ids = new Set(list.map((c) => c.model || c.id).filter(Boolean));
+        if (selectedModel && !ids.has(selectedModel)) {
+          store.dispatch({
+            type: "status",
+            text: `模型 ${selectedModel} 不在当前目录中，请在模型列表重新选择`,
+          });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [provider, selectedModel]);
+
   const loadArtifacts = useCallback(async () => {
     try {
       const result = await api.artifacts();

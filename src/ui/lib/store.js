@@ -174,8 +174,12 @@ export function applyEvent(state, event) {
     case "ready": {
       next.ready = true;
       next.connection = "open";
+      // One authoritative provider: the top-level field no longer drifts from
+      // meta.provider once the server reports a ready payload.
+      const activeProvider = event.provider || next.meta.provider || next.provider;
+      next.provider = activeProvider;
       next.meta = {
-        provider: event.provider || next.meta.provider,
+        provider: activeProvider,
         threadId: event.threadId || next.meta.threadId,
         model: event.model || next.meta.model,
         workdir: event.workdir || next.meta.workdir,
