@@ -283,6 +283,62 @@ test("panels sheet tabs switch titles and theme selection keeps the sheet open",
   assert.ok(await page.locator(".bottom-sheet.open").isVisible());
 });
 
+test("C4 recovery: unacked command re-sends with the SAME id and a server echo clears it", async (t) => {
+  const ready = {
+    type: "ready",
+    threadId: "thread-v2",
+    model: "gpt-6.1-sol",
+    clients: 1,
+    workdir: root,
+    run: { state: "ready", label: "空闲" },
+    history: [],
+  };
+  const { page } = await boot(t, { ws: { defaultReadyPayload: ready } });
+  await page.waitForFunction(() => document.querySelector("#runState")?.dataset.state === "ready");
+  await page.fill("#prompt", "恢复语义测试");
+  await page.click("#send");
+  await page.waitForFunction(() => (window.__sentFrames || []).some((f) => f.type === "prompt" && f.commandId));
+  const first = await page.evaluate(() => (window.__sentFrames.find((f) => f.type === "prompt") || {}).commandId);
+
+  // Drop BEFORE the server acks: the command becomes 结果未确认 (unknown chip).
+  await page.evaluate(() => window.__closeMockSockets());
+  await page.waitForSelector(".command-chip.command-unknown");
+  assert.match(await page.locator(".command-chip.command-unknown").innerText(), /未确认|等待确认/);
+
+  // Reconnect: the pending command must be re-sent with the SAME id (never a
+  // new one), so the server's dedupe can decide execution exactly once.
+  await page.evaluate(() => document.querySelector("#connect")?.click());
+  await page.waitForFunction(
+    (id) => (window.__sentFrames || []).filter((f) => f.type === "prompt" && f.commandId === id).length >= 2,
+    first,
+    { timeout: 8000 },
+  );
+  const ids = await page.evaluate(() =>
+    (window.__sentFrames || []).filter((f) => f.type === "prompt").map((f) => f.commandId),
+  );
+  assert.deepEqual(ids, [first, first], "same commandId re-delivered, never re-issued");
+
+  // The server echoes the authoritative user message -> pending chip clears
+  // and no third copy is ever sent.
+  await page.evaluate(
+    (id) => window.__dispatchServerMessage({ type: "command.accepted", commandId: id, seq: 1 }),
+    first,
+  );
+  await page.evaluate(
+    (id) =>
+      window.__dispatchServerMessage({
+        type: "message.started",
+        messageId: "user:echo-1",
+        role: "user",
+        commandId: id,
+        seq: 2,
+      }),
+    first,
+  );
+  await page.waitForTimeout(300);
+  assert.equal(await page.locator(".command-chip").count(), 0, "linked command bubble is gone");
+});
+
 test("claude ready drives the provider everywhere: thread list source + approval buttons", async (t) => {
   const { page } = await boot(t, {
     ws: {
