@@ -1080,6 +1080,10 @@ button.secondary {
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-2);
+  /* Narrow viewports (360 CSS dp phones): never clip the send button — let
+     the row wrap instead of pushing the primary action off-screen. */
+  flex-wrap: wrap;
+  row-gap: 2px;
 }
 .composer-left,
 .composer-right {
@@ -1089,6 +1093,24 @@ button.secondary {
 }
 .composer-right {
   gap: var(--sp-1);
+}
+
+@media (max-width: 410px) {
+  .composer-right {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    row-gap: 2px;
+  }
+  .model-button-label {
+    max-width: 84px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .access-button,
+  .model-button {
+    padding: 0 10px;
+  }
 }
 
 .ghost-button {

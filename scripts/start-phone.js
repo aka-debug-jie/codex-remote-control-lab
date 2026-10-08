@@ -2049,7 +2049,7 @@ class SharedBridge {
       });
   }
 
-  startPrompt(text, attachments = [], options = {}) {
+  startPrompt(text, attachments = [], options = {}, commandId = null) {
     this.interruptRequested = false;
     const input = [{ type: "text", text, text_elements: [] }];
     const savedImages = [];
@@ -2489,45 +2489,74 @@ function bindBrowser(browser, phoneToken, threadId, cookieAuthorized = false) {
       browser.close();
       return;
     }
+    // A command-handler bug must degrade that one request, never kill the
+    // whole bridge process for every connected client.
+    try {
+      dispatchClientCommand(bridge, browser, msg);
+    } catch (error) {
+      console.error("[bridge-ws] command handler failed:", error);
+      try {
+        if (msg.commandId) bridge.emitTo(browser, "command.rejected", { commandId: msg.commandId, reason: "internal handler error" });
+        bridge.emitTo(browser, "error", { text: `命令处理失败：${error.message}` });
+      } catch {
+        /* ignore secondary failures */
+      }
+    }
     if (msg.type === "ping") {
       bridge.emitTo(browser, "pong", {});
       return;
     }
-    if (msg.type === "resync") {
-      if (typeof bridge.sendSnapshot === "function") bridge.sendSnapshot(browser);
-      else if (typeof bridge.snapshotPayload === "function") bridge.emitTo(browser, "history.snapshot", bridge.snapshotPayload());
-      return;
-    }
-    if (msg.type === "prompt") {
-      const result = bridge.prompt(msg.text, msg.attachments, msg.options, msg.commandId);
-      if (msg.commandId && result && result.status === "rejected") {
-        bridge.emitTo(browser, "command.rejected", { commandId: msg.commandId, reason: result.reason || "rejected" });
-      } else if (msg.commandId) {
-        bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId, queued: Boolean(result && result.queued), duplicate: Boolean(result && result.duplicate) });
-      }
-    }
-    if (msg.type === "interrupt") {
-      // Unsupported actions must reject, never fake an ack (B01/C2 honesty).
-      if (typeof bridge.interrupt === "function") {
-        bridge.interrupt();
-        if (msg.commandId) bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId });
-      } else {
-        bridge.emitTo(browser, "status", { text: `${providerLabel()} provider 暂不支持运行中中断。` });
-        if (msg.commandId) {
-          bridge.emitTo(browser, "command.rejected", { commandId: msg.commandId, reason: "unsupported-by-provider" });
-        }
-      }
-    }
-    if (msg.type === "approval") {
-      const result = bridge.approval(msg.request, msg.decision, msg.always);
-      if (msg.commandId && result && result.status === "rejected") {
-        bridge.emitTo(browser, "command.rejected", { commandId: msg.commandId, reason: result.reason || "rejected" });
-      } else if (msg.commandId) {
-        bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId });
-      }
-    }
   });
 }
+
+// prompt / interrupt / approval / resync dispatch，与 bindBrowser 的帧处理分离，
+// 便于失败隔离与测试。
+function dispatchClientCommand(bridge, browser, msg) {
+  if (msg.type === "resync") {
+    if (typeof bridge.sendSnapshot === "function") bridge.sendSnapshot(browser);
+    else if (typeof bridge.snapshotPayload === "function") bridge.emitTo(browser, "history.snapshot", bridge.snapshotPayload());
+    return;
+  }
+  if (msg.type === "prompt") {
+    const result = bridge.prompt(msg.text, msg.attachments, msg.options, msg.commandId);
+    if (msg.commandId && result && result.status === "rejected") {
+      bridge.emitTo(browser, "command.rejected", { commandId: msg.commandId, reason: result.reason || "rejected" });
+    } else if (msg.commandId) {
+      bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId, queued: Boolean(result && result.queued), duplicate: Boolean(result && result.duplicate) });
+    }
+    return;
+  }
+  if (msg.type === "interrupt") {
+    // Unsupported actions must reject, never fake an ack (B01/C2 honesty).
+    if (typeof bridge.interrupt === "function") {
+      bridge.interrupt();
+      if (msg.commandId) bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId });
+    } else {
+      bridge.emitTo(browser, "status", { text: `${providerLabel()} provider 暂不支持运行中中断。` });
+      if (msg.commandId) {
+        bridge.emitTo(browser, "command.rejected", { commandId: msg.commandId, reason: "unsupported-by-provider" });
+      }
+    }
+    return;
+  }
+  if (msg.type === "approval") {
+    const result = bridge.approval(msg.request, msg.decision, msg.always);
+    if (msg.commandId && result && result.status === "rejected") {
+      bridge.emitTo(browser, "command.rejected", { commandId: msg.commandId, reason: result.reason || "rejected" });
+    } else if (msg.commandId) {
+      bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId });
+    }
+  }
+}
+
+// Last-resort guard: a stray uncaught error logs loudly and keeps the bridge
+// alive for the already-connected phones instead of killing the process.
+process.on("uncaughtException", (error) => {
+  console.error("[bridge] uncaughtException (kept alive):", error);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[bridge] unhandledRejection (kept alive):", reason);
+});
 
 async function main() {
   const codex = shouldStartCodexServer ? startCodexServer() : null;

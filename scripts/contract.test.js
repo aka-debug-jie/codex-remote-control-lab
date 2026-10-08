@@ -9,6 +9,7 @@ const os = require("os");
 const path = require("path");
 const http = require("http");
 const { spawn } = require("child_process");
+const WebSocket = require("ws");
 
 const TOKEN = "contract-token-123";
 const PNG_1PX = Buffer.from(
@@ -241,4 +242,57 @@ test("/api/info exposes capability negotiation (B01/C2)", async (t) => {
     if (!withToken) assert.equal(body.workdir, undefined);
     else assert.ok(body.workdir);
   }
+});
+
+// The crash class that ate a whole device session: a REAL prompt sent over a
+// REAL WS must never take the bridge process down, and must echo a user
+// message carrying the commandId (B1 linkage on the actual server).
+test("ws prompt loop: command acks, user echo carries commandId, process survives", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "contract-ws-"));
+  const bridge = await startBridge(dir);
+  t.after(() => bridge.stop());
+
+  const url = `ws://127.0.0.1:${bridge.port}/bridge?token=${TOKEN}`;
+  const ws = new WebSocket(url, { perMessageDeflate: false });
+  const events = [];
+  await new Promise((resolve, reject) => {
+    ws.on("open", resolve);
+    ws.on("error", reject);
+    setTimeout(() => reject(new Error("ws open timeout")), 8000);
+  });
+  const collect = new Promise((resolve) => {
+    ws.on("message", (data) => {
+      try {
+        events.push(JSON.parse(data.toString()));
+        if (events.some((event) => event.type === "message.finished" && event.role === "user")) resolve();
+      } catch {
+        /* ignore */
+      }
+    });
+  });
+  // Frame-level auth: without a session cookie each frame must carry the token
+  // (same rule the old clients use; cookie-authed WebViews skip this check).
+  ws.send(JSON.stringify({ type: "prompt", text: "contract echo test", commandId: "ws-c-1", token: TOKEN }));
+  await Promise.race([collect, new Promise((_, reject) => setTimeout(() => reject(new Error("no user echo within 12s")), 12000))]);
+  // command.accepted is emitted right after the synchronous prompt() returns;
+  // give the socket a beat to flush it before asserting.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  const accepted = events.find((event) => event.type === "command.accepted" && event.commandId === "ws-c-1");
+  assert.ok(
+    accepted,
+    `command.accepted with the client commandId; got: ${JSON.stringify(events.map((e) => ({ t: e.type, c: e.commandId, r: e.role, x: e.text })))}`,
+  );
+  const echo = events.find((event) => event.type === "message.started" && event.role === "user");
+  assert.ok(echo, "user message echo emitted");
+  assert.equal(echo.commandId, "ws-c-1", "user echo carries the commandId (B1 linkage)");
+  ws.close();
+
+  // The process must still be alive and serving.
+  const alive = await request(bridge.port, { path: `/api/info?token=${TOKEN}` });
+  assert.equal(alive.status, 200, "bridge process survived a real prompt");
+
+  // And the error path: a bogus provider-missing turn degrades, not dies.
+  // (Already covered indirectly: in the fixture env the CLI is absent, so the
+  // run fails via run.error; the socket-level contract above is the point.)
 });
