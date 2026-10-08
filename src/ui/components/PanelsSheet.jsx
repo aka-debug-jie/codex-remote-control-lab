@@ -93,10 +93,18 @@ export function PanelsSheet({
             setPanel("审查", [{ key: "none", text: "当前工作目录不是 Git 仓库", detail: "Diff 功能不可用", icon: "Δ" }]);
           } else {
             const list = [];
+            const source = result.displaySource || result.source || "working tree";
+            const isLatest = source === "latest commit";
             list.push({ key: "branch", text: "分支", detail: result.branch || "unknown", icon: "G" });
+            list.push({ key: "source", text: "来源", detail: isLatest ? "最近提交（工作树无更改）" : "工作树（未提交改动）", icon: "◈" });
             (result.stat || []).forEach((line, i) => list.push({ key: `s${i}`, text: line.trim(), icon: "Σ" }));
             (result.files || []).forEach((file) => list.push({ key: file.path, text: file.path, detail: file.status, icon: file.status || "MOD", onClick: () => (file.openable ? openFile(file.path) : appendToPrompt(`审查目标：${file.path}`)) }));
-            setPanel(result.clean ? "审查（无更改）" : `审查（${(result.files || []).length} 处更改）`, list);
+            const title = isLatest
+              ? `审查（最近提交 ${(result.files || []).length} 处）`
+              : result.clean
+                ? "审查（工作树无更改）"
+                : `审查（${(result.files || []).length} 处更改）`;
+            setPanel(title, list);
           }
         } else if (current === "status") {
           const result = await api.status(true);
@@ -215,7 +223,12 @@ export function PanelsSheet({
                 {preview.kind === "image" || preview.url ? (
                   <img src={authedUrl(preview.url) || preview.url} alt={preview.path || "preview"} />
                 ) : (
-                  <pre>{preview.text || ""}</pre>
+                  <>
+                    <pre>{preview.text || ""}</pre>
+                    {preview.truncated ? (
+                      <p className="artifact-preview-note">已截断显示（文件较大，仅显示前 80000 字符）</p>
+                    ) : null}
+                  </>
                 )}
               </div>
             ) : null}

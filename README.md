@@ -100,7 +100,7 @@ npm run build:ui     # vite build -> public/ (hashed assets + copied static file
 npm run dev:ui       # hot-reload dev server, proxies /api and /bridge to the bridge
 ```
 
-`npm run dev:ui` proxies to `PHONE_DEV_PROXY` (default `http://100.108.139.80:45214`);
+`npm run dev:ui` proxies to `PHONE_DEV_PROXY` (default `http://127.0.0.1:45214`);
 open the dev URL with `?token=<bridge token>` to develop against the live session.
 
 The bridge serves hashed `/assets/*` with a one-year immutable cache and

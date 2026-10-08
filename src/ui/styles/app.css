@@ -1426,6 +1426,12 @@ button.secondary {
   padding: var(--sp-3);
   border-radius: var(--shape-md);
 }
+.artifact-preview-note {
+  margin-top: var(--sp-2);
+  font-size: var(--text-caption);
+  color: var(--on-surface-variant);
+  opacity: 0.85;
+}
 
 /* ------------------------- fullscreen dialog ----------------------- */
 .fullscreen-dialog {

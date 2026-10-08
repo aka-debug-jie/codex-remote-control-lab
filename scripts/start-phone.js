@@ -1158,7 +1158,9 @@ async function reviewSummary() {
     return {
       branch: null,
       clean: true,
+      workingTreeClean: true,
       source: "working tree",
+      displaySource: "working tree",
       files: [],
       totals: { additions: 0, deletions: 0 },
       stat: [],
@@ -1172,14 +1174,20 @@ async function reviewSummary() {
     runGit(["diff", "HEAD", "--numstat", "--"]),
   ]);
   const working = await decorateReviewFiles(workingTreeReviewFiles(statusText, numstatText));
-  const fallback = working.files.length ? null : await decorateReviewFiles(await lastCommitReviewFiles());
+  // `clean`/`workingTreeClean` describe ONLY the working tree. The latest-commit
+  // view is a separate, explicitly-labelled fallback and must never be mistaken
+  // for uncommitted changes.
+  const workingTreeClean = working.files.length === 0;
+  const fallback = workingTreeClean ? await decorateReviewFiles(await lastCommitReviewFiles()) : null;
   const source = fallback ? "latest commit" : "working tree";
   const files = fallback?.files || working.files;
   const totals = fallback?.totals || working.totals;
   return {
     branch,
-    clean: files.length === 0,
+    clean: workingTreeClean,
+    workingTreeClean,
     source,
+    displaySource: source,
     files,
     totals,
     stat: statText.split(/\r?\n/).filter(Boolean).slice(0, 20),
@@ -2778,18 +2786,29 @@ async function main() {
         return;
       }
       if (isImagePath(target)) {
+        const rel = relativeDisplayPath(target);
+        const rawUrl = `/api/file/raw?path=${encodeURIComponent(rel)}`;
         sendJson(req, res, 200, {
-          path: relativeDisplayPath(target),
+          path: rel,
           kind: "image",
           mimeType: mimeForPath(target),
-          imageUrl: `/api/file/raw?path=${encodeURIComponent(relativeDisplayPath(target))}`,
+          url: rawUrl,
+          // Kept as a compatibility alias for older clients; `url` is canonical.
+          imageUrl: rawUrl,
+          size: fs.statSync(target).size,
+          truncated: false,
         });
         return;
       }
+      const MAX_PREVIEW_CHARS = 80_000;
+      const fullText = fs.readFileSync(target, "utf8");
+      const truncated = fullText.length > MAX_PREVIEW_CHARS;
       sendJson(req, res, 200, {
         path: relativeDisplayPath(target),
         kind: /\.md(?:own)?$/i.test(target) ? "markdown" : "text",
-        text: fs.readFileSync(target, "utf8").slice(0, 80_000),
+        text: fullText.slice(0, MAX_PREVIEW_CHARS),
+        size: fs.statSync(target).size,
+        truncated,
       });
       return;
     }

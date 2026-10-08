@@ -133,6 +133,21 @@ export async function apiGet(path) {
   return data;
 }
 
+// Unify the file-preview shape so the UI never has to know about backend field
+// renames (e.g. the image response used to expose `imageUrl` only). Returns a
+// canonical `{ path, kind, url, text, size, truncated }`.
+export function normalizeFilePreview(raw) {
+  if (!raw || typeof raw !== "object") return raw;
+  const url = raw.url || raw.imageUrl || "";
+  return {
+    ...raw,
+    url,
+    kind: raw.kind || (url ? "image" : "text"),
+    truncated: Boolean(raw.truncated),
+    size: typeof raw.size === "number" ? raw.size : null,
+  };
+}
+
 export const api = {
   auth: () => authenticate(),
   info: () => apiGet("/api/info"),
@@ -151,5 +166,5 @@ export const api = {
   review: () => apiGet("/api/review"),
   workspace: (limit = 180) => apiGet(`/api/workspace?limit=${limit}`),
   artifacts: () => apiGet("/api/artifacts"),
-  file: (path) => apiGet(`/api/file?path=${encodeURIComponent(path)}`),
+  file: (path) => apiGet(`/api/file?path=${encodeURIComponent(path)}`).then(normalizeFilePreview),
 };
