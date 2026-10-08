@@ -6,7 +6,7 @@ const os = require("os");
 const path = require("path");
 const { execFile, spawn } = require("child_process");
 const WebSocket = require("ws");
-const { bridgeKeyForRequest, shouldDisposeIdleBridge, shouldPromoteBridgeKey } = require("./bridge-state");
+const { bridgeKeyForRequest, shouldDisposeIdleBridge, shouldPromoteBridgeKey, createDetachPolicy } = require("./bridge-state");
 const { isHistorySyncEnabled, runHistorySync } = require("./history-sync");
 const { bridgeUrls, notifyBridgeUrls, notifyTaskEvent } = require("./phone-notify");
 const { findLiveBridge, historyRevision, readThreadSnapshot } = require("./thread-read");
@@ -108,6 +108,10 @@ const sessionPath = process.env.PHONE_SESSION_FILE || path.join(root, ".phone-se
 const rateLimitCacheTtlMs = positiveNumber(process.env.PHONE_RATE_LIMIT_CACHE_TTL_MS, 5 * 60 * 1000);
 const rateLimitRefreshTimeoutMs = positiveNumber(process.env.PHONE_RATE_LIMIT_REFRESH_TIMEOUT_MS, 6000);
 const uploadDir = path.join(root, ".uploads");
+// Grace window between the last client leaving and bridge disposal: an app
+// switch / screen lock survives it, and a running task survives even beyond it
+// (disposal re-arms while busy). 0 restores the legacy kill-on-disconnect.
+const detachGraceMs = positiveNumber(process.env.PHONE_DETACH_GRACE_MS, 120 * 1000);
 const bridges = new Map();
 let notificationBridgeUrls = [];
 const historyLimit = 80;
@@ -1530,8 +1534,18 @@ class SharedBridge {
     this.seenCommands = new Set();
     this.preReadyQueue = [];
     this.startupTimer = null;
-    this.events = new EventStream();
-    this.events.setSink((record) => {
+    // Leaving the phone must not kill a running task: keep the bridge for a
+    // grace window, re-check while busy, dispose only when idle.
+    this.detachPolicy = createDetachPolicy({
+      graceMs: detachGraceMs,
+      isBusy: () => Boolean(this.activeTurnId || this.hasPendingTurnStart() || this.turnQueue.length || this.preReadyQueue.length),
+      dispose: () => {
+        this.upstream.close();
+        if (bridges.get(this.bridgeKey) === this) bridges.delete(this.bridgeKey);
+      },
+      log: (text) => console.log(`[codex-bridge ${this.bridgeKey}] ${text}`),
+    });
+    this.events = new EventStream();    this.events.setSink((record) => {
       const body = JSON.stringify(record);
       for (const client of this.clients) {
         if (client.readyState === WebSocket.OPEN) client.send(body);
@@ -1548,6 +1562,7 @@ class SharedBridge {
     // Only send a snapshot once the thread is actually loaded; otherwise the
     // client would cache an empty history. The resume-completion handler sends
     // a full snapshot when the thread becomes ready.
+    this.detachPolicy.clientBack();
     if (this.ready) {
       this.emitTo(browser, "ready", this.readyPayload());
       this.emitTo(browser, "history.snapshot", this.snapshotPayload());
@@ -1555,8 +1570,7 @@ class SharedBridge {
     browser.on("close", () => {
       this.clients.delete(browser);
       if (shouldDisposeIdleBridge({ clientCount: this.clients.size, ready: this.ready })) {
-        this.upstream.close();
-        if (bridges.get(this.bridgeKey) === this) bridges.delete(this.bridgeKey);
+        this.detachPolicy.clientGone();
       }
     });
   }
@@ -2112,6 +2126,15 @@ class ClaudeBridge {
     this.pendingApprovals = new Map();
     this.usage = null;
     this.seenCommands = new Set();
+    this.detachPolicy = createDetachPolicy({
+      graceMs: detachGraceMs,
+      isBusy: () => Boolean(this.activeTurnId || this.activeProcess || this.turnQueue.length),
+      dispose: () => {
+        this.dispose();
+        if (bridges.get(this.bridgeKey) === this) bridges.delete(this.bridgeKey);
+      },
+      log: (text) => console.log(`[claude-bridge ${this.bridgeKey}] ${text}`),
+    });
     this.events = new EventStream();
     this.events.setSink((record) => {
       const body = JSON.stringify(record);
@@ -2125,13 +2148,13 @@ class ClaudeBridge {
   addClient(browser) {
     this.clients.add(browser);
     this.emitTo(browser, "status", { text: "已加入共享 Claude bridge。" });
+    this.detachPolicy.clientBack();
     this.emitTo(browser, "ready", this.readyPayload());
     this.emitTo(browser, "history.snapshot", this.snapshotPayload());
     browser.on("close", () => {
       this.clients.delete(browser);
       if (shouldDisposeIdleBridge({ clientCount: this.clients.size })) {
-        this.dispose();
-        if (bridges.get(this.bridgeKey) === this) bridges.delete(this.bridgeKey);
+        this.detachPolicy.clientGone();
       }
     });
   }
