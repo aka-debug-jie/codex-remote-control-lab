@@ -55,6 +55,7 @@ export function App() {
   });
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem("codexPhoneModel") || "gpt-6.1-sol");
   const [selectedReasoning, setSelectedReasoning] = useState(() => localStorage.getItem("codexPhoneReasoning") || "中");
+  const [caps, setCaps] = useState(null);
 
   // Per provider+thread draft persistence. Typing is never lost when the user
   // switches sessions or the page reloads; a draft is scoped to its session so
@@ -241,7 +242,12 @@ export function App() {
       .catch(() => {})
       .then(() => {
         if (cancelled) return;
-        api.info().catch(() => {});
+        api
+          .info()
+          .then((info) => {
+            if (!cancelled) setCaps(info.capabilities || null);
+          })
+          .catch(() => {});
         loadThreads();
         loadArtifacts();
         connection.connect(initialThread);
@@ -395,7 +401,7 @@ export function App() {
                 key={approval.approvalId}
                 approval={approval}
                 onDecision={decide}
-                allowAlways={(meta.provider || provider) === "codex"}
+                allowAlways={caps ? caps.sessionApprovalAlways !== false : (meta.provider || provider) === "codex"}
               />
             ))}
             <div className="composer-stack">

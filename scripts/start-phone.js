@@ -2476,9 +2476,16 @@ function bindBrowser(browser, phoneToken, threadId, cookieAuthorized = false) {
       }
     }
     if (msg.type === "interrupt") {
-      if (typeof bridge.interrupt === "function") bridge.interrupt();
-      else bridge.emitTo(browser, "status", { text: `${providerLabel()} provider 暂不支持运行中中断。` });
-      if (msg.commandId) bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId });
+      // Unsupported actions must reject, never fake an ack (B01/C2 honesty).
+      if (typeof bridge.interrupt === "function") {
+        bridge.interrupt();
+        if (msg.commandId) bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId });
+      } else {
+        bridge.emitTo(browser, "status", { text: `${providerLabel()} provider 暂不支持运行中中断。` });
+        if (msg.commandId) {
+          bridge.emitTo(browser, "command.rejected", { commandId: msg.commandId, reason: "unsupported-by-provider" });
+        }
+      }
     }
     if (msg.type === "approval") {
       const result = bridge.approval(msg.request, msg.decision, msg.always);
@@ -2548,6 +2555,19 @@ async function main() {
         managedCodexServer: shouldStartCodexServer,
         tokenRequired,
         authMode,
+        // Declared on every call: the UI must disable or explain unsupported
+        // actions instead of discovering them via runtime failures (B01/C2).
+        capabilities: {
+          protocol: 3,
+          interrupt: isCodexProvider,
+          interactiveApproval: isCodexProvider,
+          sessionApprovalAlways: isCodexProvider,
+          reasoningEffort: isCodexProvider,
+          imageAttachments: true,
+          fileUpload: false,
+          historySync: Boolean(isCodexProvider && historySyncEnabled),
+          modelDiscovery: isCodexProvider,
+        },
         // Absolute paths / upstream URLs are only exposed to authenticated callers.
         ...(authed
           ? {

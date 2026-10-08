@@ -172,3 +172,26 @@ test("unauthenticated or wrongly authed file reads are rejected", async (t) => {
     401,
   );
 });
+
+test("/api/info exposes capability negotiation (B01/C2)", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "contract-info-"));
+  const bridge = await startBridge(dir);
+  t.after(() => bridge.stop());
+  for (const withToken of [false, true]) {
+    const res = await request(bridge.port, {
+      path: withToken ? `/api/info?token=${TOKEN}` : "/api/info",
+    });
+    assert.equal(res.status, 200);
+    const body = JSON.parse(res.body);
+    assert.equal(body.capabilities.protocol, 3);
+    // The claude-fixture bridge must NOT silently pretend Codex abilities.
+    assert.equal(body.capabilities.interrupt, false);
+    assert.equal(body.capabilities.interactiveApproval, false);
+    assert.equal(body.capabilities.sessionApprovalAlways, false);
+    assert.equal(body.capabilities.imageAttachments, true);
+    assert.equal(body.capabilities.fileUpload, false);
+    // Workdir stays gated behind auth; capabilities do not leak paths.
+    if (!withToken) assert.equal(body.workdir, undefined);
+    else assert.ok(body.workdir);
+  }
+});
