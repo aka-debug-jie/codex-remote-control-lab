@@ -12,6 +12,7 @@ import { WorkspaceStrip } from "./WorkspaceStrip.jsx";
 import { useStoreSelector, store, connection } from "./store.jsx";
 import { api, initialThread } from "../lib/api.js";
 import { loadCachedMessages } from "../lib/cache.js";
+import { loadDraft, saveDraft } from "../lib/drafts.js";
 import { runStateText } from "../lib/store.js";
 import { accessModes, reasoningEffortValue } from "../lib/constants.js";
 import { applyTheme, loadPref, watchSystemTheme } from "../lib/theme.js";
@@ -22,12 +23,13 @@ function titleForThread(thread) {
 }
 
 export function App() {
-  const { ready, run, meta, provider, approvals } = useStoreSelector((s) => ({
+  const { ready, run, meta, provider, approvals, commands } = useStoreSelector((s) => ({
     ready: s.ready,
     run: s.run,
     meta: s.meta,
     provider: s.provider,
     approvals: s.approvals,
+    commands: s.commands,
   }));
 
   const promptRef = useRef(null);
@@ -45,7 +47,7 @@ export function App() {
   const [actionMessage, setActionMessage] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [artifacts, setArtifacts] = useState([]);
-  const [promptText, setPromptText] = useState("");
+  const [promptText, setPromptText] = useState(() => loadDraft("codex", initialThread || ""));
   const [accessIndex, setAccessIndex] = useState(() => {
     const saved = localStorage.getItem("codexPhoneAccess");
     const idx = accessModes.findIndex((m) => m.label === saved);
@@ -53,6 +55,45 @@ export function App() {
   });
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem("codexPhoneModel") || "gpt-6.1-sol");
   const [selectedReasoning, setSelectedReasoning] = useState(() => localStorage.getItem("codexPhoneReasoning") || "中");
+
+  // Per provider+thread draft persistence. Typing is never lost when the user
+  // switches sessions or the page reloads; a draft is scoped to its session so
+  // it can never be sent to a different thread.
+  const promptTextRef = useRef(promptText);
+  promptTextRef.current = promptText;
+  const draftKeyRef = useRef({ provider, threadId: meta.threadId });
+  useEffect(() => {
+    const prev = draftKeyRef.current;
+    const next = { provider, threadId: meta.threadId };
+    if (prev.provider === next.provider && prev.threadId === next.threadId) return;
+    const text = promptTextRef.current;
+    saveDraft(prev.provider, prev.threadId, text);
+    // When a "new" session gets its authoritative thread id, migrate the draft
+    // instead of loading an empty one and wiping what the user just typed.
+    const migratingNew = !prev.threadId && Boolean(next.threadId);
+    draftKeyRef.current = next;
+    if (migratingNew) saveDraft(next.provider, next.threadId, text);
+    else setPromptText(loadDraft(next.provider, next.threadId));
+  }, [provider, meta.threadId]);
+
+  const handlePromptChange = useCallback(
+    (value) => {
+      setPromptText(value);
+      saveDraft(draftKeyRef.current.provider, draftKeyRef.current.threadId, value);
+    },
+    [],
+  );
+
+  const restoreCommand = useCallback((command) => {
+    const text = command.text || "";
+    setPromptText((current) => {
+      const merged = !current.trim() ? text : current.includes(text) ? current : `${current}\n${text}`;
+      saveDraft(draftKeyRef.current.provider, draftKeyRef.current.threadId, merged);
+      return merged;
+    });
+    store.dispatch({ type: "command.dismiss", commandId: command.commandId });
+    promptRef.current?.focus();
+  }, []);
 
   // theme apply + follow system
   useEffect(() => {
@@ -240,10 +281,14 @@ export function App() {
     setToolView(null);
     setActivePanel(tab);
   }, []);
-  const appendToPrompt = useCallback((text) => {
-    setPromptText((value) => `${value}${value ? "\n" : ""}${text}`);
-    promptRef.current?.focus();
-  }, []);
+  const appendToPrompt = useCallback(
+    (text) => {
+      const next = `${promptTextRef.current}${promptTextRef.current ? "\n" : ""}${text}`;
+      handlePromptChange(next);
+      promptRef.current?.focus();
+    },
+    [handlePromptChange],
+  );
   const selectModel = useCallback((model) => {
     setSelectedModel(model);
     localStorage.setItem("codexPhoneModel", model);
@@ -262,10 +307,13 @@ export function App() {
     connection.send({ type: "interrupt" });
   }, []);
   const retryPrompt = useCallback((text) => sendPrompt({ text, files: [] }), [sendPrompt]);
-  const editPrompt = useCallback((text) => {
-    setPromptText(text);
-    promptRef.current?.focus();
-  }, []);
+  const editPrompt = useCallback(
+    (text) => {
+      handlePromptChange(text);
+      promptRef.current?.focus();
+    },
+    [handlePromptChange],
+  );
 
   const onSearchChange = useCallback((value) => {
     setSearchState((s) => ({ ...s, query: value }));
@@ -316,7 +364,9 @@ export function App() {
                 selectedModel={selectedModel}
                 selectedReasoning={selectedReasoning}
                 value={promptText}
-                onChange={setPromptText}
+                onChange={handlePromptChange}
+                commands={commands}
+                onRestoreCommand={restoreCommand}
                 promptRef={promptRef}
                 onSend={sendPrompt}
                 onInterrupt={interrupt}
@@ -379,7 +429,7 @@ export function App() {
         value={promptText}
         onCancel={() => setModalOpen(false)}
         onApply={(value) => {
-          setPromptText(value);
+          handlePromptChange(value);
           setModalOpen(false);
         }}
       />

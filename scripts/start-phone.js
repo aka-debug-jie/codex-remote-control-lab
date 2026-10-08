@@ -1974,11 +1974,11 @@ class SharedBridge {
       this.seenCommands.add(commandId);
     }
     if (this.activeTurnId || this.hasPendingTurnStart()) {
-      this.turnQueue.push({ text, attachments, options });
+      this.turnQueue.push({ text, attachments, options, commandId });
       this.emit("status", { text: `已加入队列（${this.turnQueue.length} 条等待）` });
       return { status: "accepted", queued: true };
     }
-    this.startPrompt(text, attachments, options);
+    this.startPrompt(text, attachments, options, commandId);
     return { status: "accepted" };
   }
 
@@ -1998,7 +1998,7 @@ class SharedBridge {
     if (!this.ready || this.activeTurnId || this.hasPendingTurnStart() || !this.turnQueue.length) return;
     const next = this.turnQueue.shift();
     this.emit("status", { text: `正在从队列发送（剩余 ${this.turnQueue.length} 条）` });
-    this.startPrompt(next.text, next.attachments, next.options);
+    this.startPrompt(next.text, next.attachments, next.options, next.commandId);
   }
 
   syncHistory(reason) {
@@ -2050,13 +2050,14 @@ class SharedBridge {
     this.appendHistory({ type: "user", text: displayText, attachments: savedImages });
     this.userMessageCounter = (this.userMessageCounter || 0) + 1;
     const userMessageId = `user:${this.threadId}:${this.userMessageCounter}`;
-    this.emitEvent({ type: "message.started", messageId: userMessageId, role: "user", turnId: this.activeTurnId });
+    this.emitEvent({ type: "message.started", messageId: userMessageId, role: "user", turnId: this.activeTurnId, commandId });
     this.emitEvent({
       type: "message.finished",
       messageId: userMessageId,
       role: "user",
       text: displayText,
       attachments: savedImages,
+      commandId,
     });
   }
 
@@ -2242,11 +2243,11 @@ class ClaudeBridge {
       this.seenCommands.add(commandId);
     }
     if (this.activeTurnId || this.activeProcess) {
-      this.turnQueue.push({ text, attachments, options });
+      this.turnQueue.push({ text, attachments, options, commandId });
       this.emit("status", { text: `已加入队列（${this.turnQueue.length} 条等待）` });
       return { status: "accepted", queued: true };
     }
-    this.startPrompt(text, attachments, options);
+    this.startPrompt(text, attachments, options, commandId);
     return { status: "accepted" };
   }
 
@@ -2254,10 +2255,10 @@ class ClaudeBridge {
     if (this.activeTurnId || this.activeProcess || !this.turnQueue.length) return;
     const next = this.turnQueue.shift();
     this.emit("status", { text: `正在从队列发送（剩余 ${this.turnQueue.length} 条）` });
-    this.startPrompt(next.text, next.attachments, next.options);
+    this.startPrompt(next.text, next.attachments, next.options, next.commandId);
   }
 
-  startPrompt(text, attachments = [], options = {}) {
+  startPrompt(text, attachments = [], options = {}, commandId = null) {
     const savedAttachments = [];
     const savedImages = [];
     for (const attachment of attachments || []) {
@@ -2275,9 +2276,9 @@ class ClaudeBridge {
     this.activeTurnId = turnId;
     this.streamingStarted = false;
     this.appendHistory({ type: "user", text: displayText, attachments: savedImages });
-    this.emitEvent({ type: "message.started", messageId: `user:${turnId}`, role: "user", turnId });
-    this.emitEvent({ type: "message.finished", messageId: `user:${turnId}`, role: "user", text: displayText, attachments: savedImages });
-    this.emitEvent({ type: "run.started", turnId });
+    this.emitEvent({ type: "message.started", messageId: `user:${turnId}`, role: "user", turnId, commandId });
+    this.emitEvent({ type: "message.finished", messageId: `user:${turnId}`, role: "user", text: displayText, attachments: savedImages, commandId });
+    this.emitEvent({ type: "run.started", turnId, commandId });
 
     const args = [
       "-p",

@@ -65,7 +65,27 @@ export function initialState() {
     approvals: [],
     usage: null,
     provider: "codex",
+    // In-flight user commands awaiting server acknowledgement / linkage to a
+    // turn. Status: queued | awaitingAck | accepted | rejected | unknown.
+    commands: [],
   };
+}
+
+// Immutably upsert a command record keyed by commandId.
+function upsertCommand(commands, commandId, patch) {
+  if (!commandId) return commands;
+  const index = commands.findIndex((c) => c.commandId === commandId);
+  if (index < 0) {
+    return [...commands, { commandId, status: "queued", createdAt: Date.now(), ...patch }];
+  }
+  const next = commands.slice();
+  next[index] = { ...next[index], ...patch };
+  return next;
+}
+
+function removeCommand(commands, commandId) {
+  if (!commandId) return commands;
+  return commands.filter((c) => c.commandId !== commandId);
 }
 
 // Update a single message immutably (only its parts get cloned) so unchanged
@@ -203,6 +223,9 @@ export function applyEvent(state, event) {
         if (event.phase) message.phase = event.phase;
       });
       if (role === "assistant") next.activeAssistantId = event.messageId;
+      // A user message carrying a commandId is the authoritative echo of a
+      // pending command: drop the optimistic bubble so it is never shown twice.
+      if (role === "user" && event.commandId) next.commands = removeCommand(next.commands, event.commandId);
       return next;
     }
     case "message.delta": {
@@ -299,7 +322,42 @@ export function applyEvent(state, event) {
       next.notices = [...next.notices, { id: `e:${next.seq}`, text, kind: "error" }].slice(-MAX_NOTICES);
       return next;
     }
+    case "command.sent": {
+      next.commands = upsertCommand(next.commands, event.commandId, {
+        status: event.status || "awaitingAck",
+        text: event.text || "",
+        attachments: event.attachments || [],
+        threadId: event.threadId || next.meta.threadId,
+      });
+      return next;
+    }
+    case "command.accepted": {
+      next.commands = upsertCommand(next.commands, event.commandId, {
+        status: event.queued ? "queued" : "accepted",
+        acceptedAt: Date.now(),
+      });
+      return next;
+    }
+    case "command.unknown": {
+      next.commands = upsertCommand(next.commands, event.commandId, {
+        status: "unknown",
+        reason: event.reason || "结果未确认",
+      });
+      return next;
+    }
+    case "command.clear": {
+      next.commands = [];
+      return next;
+    }
+    case "command.dismiss": {
+      next.commands = removeCommand(next.commands, event.commandId);
+      return next;
+    }
     case "command.rejected": {
+      next.commands = upsertCommand(next.commands, event.commandId, {
+        status: "rejected",
+        reason: event.reason || "未知原因",
+      });
       next.notices = [
         ...next.notices,
         { id: `cr:${event.commandId || next.seq}`, kind: "error", text: `发送未被接受：${event.reason || "未知原因"}` },

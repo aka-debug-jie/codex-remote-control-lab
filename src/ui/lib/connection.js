@@ -37,12 +37,22 @@ export function createConnection(store, { onThreadChange } = {}) {
       // Keep until the server ACKs, so a command is never lost on a drop and is
       // re-sent (server dedupes by commandId) if the ACK never arrived.
       pendingCommands.set(payload.commandId, payload);
+      store.dispatch({
+        type: "command.sent",
+        commandId: payload.commandId,
+        status: open ? "awaitingAck" : "queued",
+        text: payload.text || "",
+        attachments: payload.attachments || [],
+      });
       if (open) ws.send(wire(payload));
-    } else if (open) {
+      return payload.commandId;
+    }
+    if (open) {
       ws.send(wire(payload));
     } else {
       outbox.push(payload);
     }
+    return null;
   }
 
   function flushDeltas() {
@@ -74,6 +84,8 @@ export function createConnection(store, { onThreadChange } = {}) {
       if (event.commandId) pendingCommands.delete(event.commandId);
       if (event.type === "command.rejected") {
         store.dispatch({ type: "command.rejected", commandId: event.commandId, reason: event.reason });
+      } else {
+        store.dispatch({ type: "command.accepted", commandId: event.commandId, queued: event.queued });
       }
       return;
     }
@@ -223,6 +235,11 @@ export function createConnection(store, { onThreadChange } = {}) {
       if (event.currentTarget !== ws) return;
       stopHeartbeat();
       store.dispatch({ type: "connection", status: "closed" });
+      // Sent-but-unacknowledged commands become "pending confirmation" while we
+      // cannot reach the server; they are re-sent with the same id on reconnect.
+      for (const cmd of pendingCommands.values()) {
+        store.dispatch({ type: "command.unknown", commandId: cmd.commandId, reason: "连接中断，等待确认" });
+      }
       if (!manualClose) scheduleReconnect();
     });
     socket.addEventListener("error", () => {
@@ -241,6 +258,7 @@ export function createConnection(store, { onThreadChange } = {}) {
       /* ignore */
     }
     ws = null;
+    store.dispatch({ type: "command.clear" });
     if (onThreadChange) onThreadChange(nextThreadId);
     connect(nextThreadId);
   }

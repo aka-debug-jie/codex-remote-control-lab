@@ -500,6 +500,77 @@ test("queues a send while disconnected and flushes it on reconnect", async (t) =
   );
 });
 
+test("composer draft is scoped per thread and survives a switch", async (t) => {
+  const readyFor = (id) => ({
+    type: "ready",
+    threadId: id,
+    model: "gpt-6.1-sol",
+    clients: 1,
+    workdir: root,
+    run: { state: "ready", label: "空闲" },
+    history: [],
+  });
+  const { page } = await boot(t, {
+    thread: "ta",
+    apiState: {
+      threads: [
+        { id: "ta", name: "Thread A", updatedAt: Date.now() },
+        { id: "tb", name: "Thread B", updatedAt: Date.now() },
+      ],
+    },
+    ws: { readyPayloadByThread: { ta: readyFor("ta"), tb: readyFor("tb") } },
+  });
+  await page.waitForFunction(() => document.querySelector("#runState")?.dataset.state === "ready");
+  await page.fill("#prompt", "A 的草稿");
+  await page.click("#mobileThreads");
+  await page.waitForSelector(".drawer.open");
+  await page.locator('.thread-item:has-text("Thread B")').click();
+  await page.waitForTimeout(400);
+  assert.equal(await page.inputValue("#prompt"), "", "B has no draft yet");
+  await page.fill("#prompt", "B 的草稿");
+  await page.click("#mobileThreads");
+  await page.waitForSelector(".drawer.open");
+  await page.locator('.thread-item:has-text("Thread A")').click();
+  await page.waitForTimeout(400);
+  assert.equal(await page.inputValue("#prompt"), "A 的草稿");
+});
+
+test("a rejected command surfaces a status chip and can restore its text", async (t) => {
+  const { page } = await boot(t, {
+    ws: {
+      defaultReadyPayload: {
+        type: "ready",
+        threadId: "thread-v2",
+        model: "gpt-6.1-sol",
+        clients: 1,
+        workdir: root,
+        run: { state: "ready", label: "空闲" },
+        history: [],
+      },
+    },
+  });
+  await page.waitForFunction(() => document.querySelector("#runState")?.dataset.state === "ready");
+  await page.fill("#prompt", "会被拒绝的内容");
+  await page.click("#send");
+  await page.waitForFunction(() => (window.__sentFrames || []).some((f) => f.type === "prompt" && f.commandId));
+  const cmdId = await page.evaluate(() => (window.__sentFrames.find((f) => f.type === "prompt") || {}).commandId);
+  await page.evaluate(
+    (id) => window.__dispatchServerMessage({ type: "command.rejected", commandId: id, reason: "队列已满" }),
+    cmdId,
+  );
+  await page.waitForSelector(".command-chip.command-rejected");
+  assert.match(await page.locator(".command-chip.command-rejected").innerText(), /队列已满/);
+  await page.locator(".command-chip.command-rejected .text-btn").click();
+  assert.equal(await page.inputValue("#prompt"), "会被拒绝的内容");
+});
+
+test("send is disabled until the bridge reports ready", async (t) => {
+  const { page } = await boot(t, { ws: { readyDelay: 5000 } });
+  await page.waitForSelector("#send");
+  assert.equal(await page.locator("#send").isDisabled(), true);
+  assert.match(await page.locator("#prompt").getAttribute("placeholder"), /未连接/);
+});
+
 test("renders cached messages before the socket delivers a snapshot", async (t) => {
   const cached = [{ id: "hist:0", role: "user", status: "done", parts: [{ type: "text", text: "缓存的离线消息" }] }];
   const { page } = await boot(t, {

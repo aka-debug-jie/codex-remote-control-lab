@@ -969,6 +969,39 @@ button.secondary {
   background: var(--surface-container-high);
 }
 
+.command-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 4px 4px;
+}
+.command-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: var(--text-caption);
+  padding: 4px 10px;
+  border-radius: var(--shape-sm);
+  background: var(--surface-container-high);
+  color: var(--on-surface-variant);
+}
+.command-chip.command-rejected,
+.command-chip.command-unknown {
+  background: color-mix(in srgb, var(--error) 16%, var(--surface-container-high));
+  color: var(--error);
+}
+.command-chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.command-chip .text-btn {
+  flex: none;
+  color: var(--primary);
+  font-weight: 600;
+}
+
 .composer textarea {
   width: 100%;
   min-height: 44px;
@@ -1049,6 +1082,15 @@ button.secondary {
 }
 .send-button:active {
   transform: scale(0.9);
+}
+.send-button:disabled {
+  background: var(--surface-container-highest);
+  color: var(--on-surface-variant);
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.send-button:disabled:active {
+  transform: none;
 }
 
 .voice-button {

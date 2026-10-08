@@ -4,6 +4,19 @@ import { api } from "../lib/api.js";
 import { accessModes } from "../lib/constants.js";
 import { tap } from "../lib/haptic.js";
 
+const COMMAND_STATUS_TEXT = {
+  queued: "排队中，等待连接…",
+  awaitingAck: "已发送，等待确认…",
+  accepted: "已接受，正在处理",
+  rejected: "发送失败",
+  unknown: "结果未确认",
+};
+
+function commandStatusText(command) {
+  const base = COMMAND_STATUS_TEXT[command.status] || "处理中";
+  return command.status === "rejected" && command.reason ? `${base}：${command.reason}` : base;
+}
+
 export const Composer = React.memo(function Composer({
   ready,
   run,
@@ -18,6 +31,8 @@ export const Composer = React.memo(function Composer({
   onOpenModels,
   onExpand,
   promptRef,
+  commands = [],
+  onRestoreCommand,
 }) {
   const text = value;
   const setText = onChange;
@@ -31,6 +46,7 @@ export const Composer = React.memo(function Composer({
   const accessMode = accessModes[accessIndex];
   const modelLabel = selectedModel.replace(/^gpt-/i, "").toUpperCase();
   const running = ["running", "streaming", "approval", "interrupting"].includes(run.state);
+  const activeCommands = (commands || []).filter((c) => c && c.status !== "linked");
 
   useEffect(() => {
     const el = promptRef.current;
@@ -172,11 +188,29 @@ export const Composer = React.memo(function Composer({
           ))}
         </div>
       ) : null}
+      {activeCommands.length ? (
+        <div className="command-status" role="status" aria-live="polite">
+          {activeCommands.map((command) => (
+            <div key={command.commandId} className={`command-chip command-${command.status}`}>
+              <span className="command-chip-text">{commandStatusText(command)}</span>
+              {command.status === "rejected" || command.status === "unknown" ? (
+                <button
+                  type="button"
+                  className="text-btn"
+                  onClick={() => onRestoreCommand && onRestoreCommand(command)}
+                >
+                  恢复输入
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
       <textarea
         id="prompt"
         ref={promptRef}
         rows={1}
-        placeholder="输入后续修改要求"
+        placeholder={ready ? "输入后续修改要求" : "未连接，暂时无法发送（草稿会保留）"}
         aria-label="发消息给 Codex"
         enterKeyHint="send"
         inputMode="text"
@@ -239,7 +273,14 @@ export const Composer = React.memo(function Composer({
               <span className="interrupt-label">中断</span>
             </button>
           ) : null}
-          <button id="send" type="submit" className="send-button" title="发送" aria-label="发送">
+          <button
+            id="send"
+            type="submit"
+            className="send-button"
+            title={ready ? "发送" : "未连接，无法发送"}
+            aria-label="发送"
+            disabled={!ready}
+          >
             <Icon name="send" size={22} />
           </button>
         </div>
