@@ -86,6 +86,9 @@ export function App() {
   );
 
   const restoreCommand = useCallback((command) => {
+    // Stop the automatic resend of the original command: the text becomes a
+    // user-owned draft, and a later send must be a single, correlated request.
+    connection.forgetCommand(command.commandId);
     const text = command.text || "";
     setPromptText((current) => {
       const merged = !current.trim() ? text : current.includes(text) ? current : `${current}\n${text}`;

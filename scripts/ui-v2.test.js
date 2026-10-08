@@ -477,7 +477,13 @@ test("review panel file rows open a read-only diff preview (D2)", async (t) => {
   await page.waitForSelector(".bottom-sheet.open");
   await page.click("#reviewTab");
   await page.locator('.list-row:has-text("code.txt")').click();
-  await page.waitForSelector("#artifactPreview .diff-patch");
+  // Wait for the PATCH CONTENT, not the container: the sheet shows 计算 diff…
+  // while the request is in flight, so a selector-only wait is a known flake.
+  await page.waitForFunction(
+    () => document.querySelector("#artifactPreview .diff-patch")?.textContent.includes("+line2"),
+    null,
+    { timeout: 8000 },
+  );
   assert.match(await page.locator("#artifactPreview .diff-patch").innerText(), /\+line2/);
   assert.match(await page.locator("#artifactPreview").innerText(), /工作树补丁/);
   // Switch to the full-file view from the diff preview.
@@ -876,6 +882,43 @@ test("a rejected command surfaces a status chip and can restore its text", async
   assert.match(await page.locator(".command-chip.command-rejected").innerText(), /队列已满/);
   await page.locator(".command-chip.command-rejected .text-btn").click();
   assert.equal(await page.inputValue("#prompt"), "会被拒绝的内容");
+});
+
+// Regression: after 恢复输入, the OLD request must stop auto-resending on
+// reconnect — otherwise the restored draft plus the auto-resend become two
+// executions with uncorrelated ids.
+test("恢复输入 cancels the automatic resend of the original command", async (t) => {
+  const ready = {
+    type: "ready",
+    threadId: "thread-v2",
+    model: "gpt-6.1-sol",
+    clients: 1,
+    workdir: root,
+    run: { state: "ready", label: "空闲" },
+    history: [],
+  };
+  const { page } = await boot(t, { ws: { defaultReadyPayload: ready } });
+  await page.waitForFunction(() => document.querySelector("#runState")?.dataset.state === "ready");
+  await page.fill("#prompt", "断线前的输入");
+  await page.click("#send");
+  await page.waitForFunction(() => (window.__sentFrames || []).some((f) => f.type === "prompt" && f.commandId));
+  const oldId = await page.evaluate(() => (window.__sentFrames.find((f) => f.type === "prompt") || {}).commandId);
+  await page.evaluate(() => window.__closeMockSockets());
+  await page.waitForSelector(".command-chip.command-unknown");
+  const framesBeforeRestore = await page.evaluate(() => (window.__sentFrames || []).length);
+  // User restores instead of waiting for the auto-resend.
+  await page.locator(".command-chip.command-unknown .text-btn").click();
+  assert.equal(await page.inputValue("#prompt"), "断线前的输入", "text restored to the composer");
+  const framesAfterRestore = await page.evaluate(() => (window.__sentFrames || []).length);
+  console.log("DBG frames before/after restore:", framesBeforeRestore, framesAfterRestore);
+  await page.evaluate(() => document.querySelector("#connect")?.click());
+  await page.waitForTimeout(1200);
+  const afterRestore = await page.evaluate(
+    (n) => (window.__sentFrames || []).slice(n).filter((f) => f.type === "prompt").map((f) => f.commandId),
+    framesBeforeRestore,
+  );
+  console.log("DBG afterRestore frames:", JSON.stringify(afterRestore));
+  assert.ok(!afterRestore.includes(oldId), "restored command must not auto-resend after reconnect");
 });
 
 test("send is disabled until the bridge reports ready", async (t) => {

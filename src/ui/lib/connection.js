@@ -247,6 +247,14 @@ export function createConnection(store, { onThreadChange } = {}) {
     });
   }
 
+  function forgetCommand(commandId) {
+    // "恢复输入" hands the failed text back to the user; the automatic resend
+    // of the original command must stop NOW, otherwise restoring and then
+    // re-sending produces two executions with two different ids that the
+    // server cannot correlate.
+    if (commandId) pendingCommands.delete(commandId);
+  }
+
   function setThread(nextThreadId) {
     if (nextThreadId === threadId && ws && ws.readyState === WebSocket.OPEN) return;
     clearReconnect();
@@ -287,6 +295,7 @@ export function createConnection(store, { onThreadChange } = {}) {
     connect,
     setThread,
     send,
+    forgetCommand,
     // Force a fresh socket even if the current one is still OPEN (used when the
     // bridge is reachable but the upstream/thread is stuck).
     reconnect() {

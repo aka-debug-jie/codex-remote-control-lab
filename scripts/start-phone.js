@@ -2005,9 +2005,15 @@ class SharedBridge {
     }
     if (!this.threadId || !this.ready) {
       // Accept and hold until the thread becomes ready; never silently drop.
+      // Registering NOW dedupes client reconnects (a resent unacked prompt
+      // must not be enqueued twice); the flush runs startPrompt directly.
       if (this.preReadyQueue.length >= 20) return { status: "rejected", reason: "queue-full" };
+      if (commandId) {
+        if (this.seenCommands.size > 1000) this.seenCommands.clear();
+        this.seenCommands.add(commandId);
+      }
       this.preReadyQueue.push({ text, attachments, options, commandId });
-      return { status: "queued" };
+      return { status: "queued", queued: true };
     }
     if (commandId) {
       if (this.seenCommands.size > 1000) this.seenCommands.clear();
@@ -2026,14 +2032,10 @@ class SharedBridge {
     if (!this.preReadyQueue.length) return;
     const queue = this.preReadyQueue.splice(0);
     for (const item of queue) {
-      if (item.commandId) {
-        if (this.seenCommands.size > 1000) this.seenCommands.clear();
-        this.seenCommands.add(item.commandId);
-      }
-      // Keep the commandId: the queued prompt's user echo must carry it so the
-      // client can link (and clear) its pending command. Losing it here is what
-      // leaves a "已接受" chip stuck forever after a bridge restart.
-      this.prompt(item.text, item.attachments, item.options, item.commandId || null);
+      // Run the queued prompt directly: dedupe was applied at enqueue time, so
+      // going through prompt() again would drop it as a "duplicate" and the
+      // queued message would never reach Codex (the reported swallowed-send).
+      this.startPrompt(item.text, item.attachments, item.options, item.commandId || null);
     }
   }
 
