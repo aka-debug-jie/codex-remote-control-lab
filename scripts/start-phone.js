@@ -1546,16 +1546,11 @@ class SharedBridge {
       graceMs: detachGraceMs,
       isBusy: () => Boolean(this.activeTurnId || this.hasPendingTurnStart() || this.turnQueue.length || this.preReadyQueue.length),
       dispose: () => {
-        // Release the app-server's per-thread writer lock BEFORE closing, so
-        // the thread is immediately resumable elsewhere (no dangling writers).
-        this.disposeUpstreamThread();
         this.upstream.close();
         if (bridges.get(this.bridgeKey) === this) bridges.delete(this.bridgeKey);
       },
       log: (text) => console.log(`[codex-bridge ${this.bridgeKey}] ${text}`),
     });
-    // One automatic retry after a writer-lock unload; never loop.
-    this.resumeRetried = false;
     this.events = new EventStream();    this.events.setSink((record) => {
       const body = JSON.stringify(record);
       for (const client of this.clients) {
@@ -1762,19 +1757,6 @@ class SharedBridge {
     return params;
   }
 
-  // Best-effort: tell the app-server to drop this thread's writer lock so a
-  // later resume (or another bridge) never hits "already has an active writer".
-  disposeUpstreamThread() {
-    if (this.upstream && this.upstream.readyState === WebSocket.OPEN && this.requestedThreadId) {
-      try {
-        const id = this.request("thread/unload", { threadId: this.requestedThreadId });
-        this.pending.set(id, "thread/unload");
-      } catch {
-        /* best effort */
-      }
-    }
-  }
-
   bindUpstream() {
     this.upstream.on("open", () => {
       this.request("initialize", {
@@ -1809,35 +1791,27 @@ class SharedBridge {
         for (const event of normalizeCodexMessage(msg, this.codexState)) this.emitEvent(event);
       }
 
-      if (pendingMethod === "thread/unload") {
-        // Fire-and-forget writer-lock release for detach disposal.
-        this.pending.delete(msg.id);
-        return;
-      }
-
       if (pendingMethod === "thread/start" || pendingMethod === "thread/resume") {
         this.pending.delete(msg.id);
         clearTimeout(this.startupTimer);
         this.startupTimer = null;
         if (msg.error) {
           const problem = msg.error.message || JSON.stringify(msg.error);
-          // The app-server keeps a per-thread writer lock; a crashed client or
-          // an un-unloaded bridge leaves it dangling and every later
-          // thread/resume is rejected ("already has an active writer"), which
-          // used to strand thread switching forever. Drop the writer and retry
-          // the resume exactly once.
-          if (/already has an active writer/i.test(problem) && !this.resumeRetried) {
-            this.resumeRetried = true;
-            try {
-              const unloadId = this.request("thread/unload", { threadId: this.requestedThreadId });
-              this.pending.set(unloadId, "thread/unload");
-            } catch {
-              /* best effort: even a failed unload must not stop the retry */
+          // The app-server serializes threads with a per-thread writer lock that
+          // lives in ~/.codex/thread-writer-locks; another LOCAL client (the
+          // desktop CLI / VSCode plugin daemon) currently writing the thread
+          // must release it first. There is no unload API on this protocol —
+          // retrying would only spin — so surface an actionable message.
+          if (/already has an active writer/i.test(problem)) {
+            console.warn(`[codex-bridge ${this.bridgeKey}] thread ${this.requestedThreadId} write-locked by another local Codex client`);
+            this.startupFailed = true;
+            this.emit("error", {
+              text: "该会话正被本机其他 Codex 客户端占用（桌面端/CLI 仍在写入）。请先在桌面端关闭或结束该会话，再在手机上切换。",
+            });
+            const queued = this.preReadyQueue.splice(0);
+            for (const item of queued) {
+              if (item.commandId) this.emit("command.rejected", { commandId: item.commandId, reason: "writer-locked-by-local-client" });
             }
-            const retryMethod = this.requestedThreadId ? "thread/resume" : "thread/start";
-            const retryId = this.request(retryMethod, this.startupParams());
-            this.pending.set(retryId, retryMethod);
-            this.emit("status", { text: "写锁被占用，已尝试释放占用并重新恢复…" });
             return;
           }
           this.startupFailed = true;

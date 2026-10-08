@@ -1,9 +1,13 @@
 // Thread-switching contract: a REAL bridge against a FAKE Codex app-server.
 // Reproduces the exact device-reported failure chain:
-//   thread/resume rejected ("already has an active writer") -> bridge stayed
-//   unready forever -> the phone kept showing the previous conversation.
-// The fix contract: unload the dangling writer, retry once, then deliver
-// ready + history.snapshot for the resumed thread.
+//   thread/resume rejected ("already has an active writer") because a LOCAL
+//   desktop Codex client holds the per-thread writer lock (file flock under
+//   ~/.codex/thread-writer-locks; this protocol version has no unload API) —
+//   so the bridge stayed unready forever and the phone kept showing the
+//   previous conversation.
+// The contract: switching clears the old content on the client immediately,
+// the bridge attempts resume exactly ONCE (no pointless spinning) and
+// surfaces an actionable error for the occupied thread.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
@@ -19,10 +23,7 @@ async function startFakeAppServer() {
   const wss = new WebSocketServer({ port: 0 });
   await new Promise((resolve) => wss.on("listening", resolve));
   const port = wss.address().port;
-    const script = {
-    sawUnload: false,
-    resumeAttempts: 0,
-  };
+  const script = { resumeAttempts: 0 };
   wss.on("connection", (ws) => {
     ws.on("message", (data) => {
       let msg;
@@ -42,53 +43,17 @@ async function startFakeAppServer() {
       }
       if (msg.method === "thread/resume") {
         script.resumeAttempts += 1;
-        if (script.resumeAttempts === 1) {
-          ws.send(JSON.stringify({ id: msg.id, error: { code: -32600, message: `thread ${msg.params.threadId} already has an active writer` } }));
-          return;
-        }
-        ws.send(JSON.stringify({ id: msg.id, result: { thread: { id: msg.params.threadId, turns: [] } } }));
-        return;
-      }
-      if (msg.method === "thread/unload") {
-        script.sawUnload = true;
-        ws.send(JSON.stringify({ id: msg.id, result: { ok: true } }));
+        // Simulate the desktop daemon permanently holding the thread's writer.
+        ws.send(JSON.stringify({ id: msg.id, error: { code: -32600, message: `thread ${msg.params.threadId} already has an active writer` } }));
         return;
       }
       ws.send(JSON.stringify({ id: msg.id, result: { ok: true } }));
     });
   });
-  
   return { port, script, wss };
 }
 
-function wsRequest(port, urlPath) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}${urlPath}`, { perMessageDeflate: false });
-    const events = [];
-    ws.on("message", (data) => {
-      try {
-        events.push(JSON.parse(data.toString()));
-      } catch {
-        /* ignore */
-      }
-    });
-    ws.on("error", reject);
-    const timer = setTimeout(() => reject(new Error(`timeout: got ${JSON.stringify(events.map((e) => e.type))}`)), 12000);
-    const wait = (predicate) => {
-      if (predicate(events)) {
-        clearTimeout(timer);
-        resolve({ events, close: () => ws.close() });
-        return true;
-      }
-      return false;
-    };
-    ws._wait = wait;
-    ws._interval = setInterval(() => ws._poll && ws._poll(), 100);
-    ws._originalWait = wait;
-  });
-}
-
-test("thread switch survives a dangling writer lock: unload -> resume retry -> snapshot", async (t) => {
+test("switching to a locally write-locked thread: single attempt + actionable error, no spin", async (t) => {
   const fake = await startFakeAppServer();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "contract-switch-"));
   const port = 30000 + Math.floor(Math.random() * 20000);
@@ -103,7 +68,6 @@ test("thread switch survives a dangling writer lock: unload -> resume retry -> s
       CODEX_WORKDIR: dir,
       PHONE_SESSION_FILE: path.join(os.tmpdir(), `switch-session-${port}`),
       PHONE_BIND_HOST: "127.0.0.1",
-      // Shorten detach grace so a switch cannot be blocked by the policy either.
       PHONE_DETACH_GRACE_MS: "500",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -111,8 +75,7 @@ test("thread switch survives a dangling writer lock: unload -> resume retry -> s
   const bridgeLog = [];
   child.stdout.on("data", (c) => bridgeLog.push(c.toString()));
   child.stderr.on("data", (c) => bridgeLog.push(c.toString()));
-  
-  
+
   // The HTTP listener must be up before the WS client dials (ECONNREFUSED otherwise).
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`bridge did not start: ${bridgeLog.join("").slice(-600)}`)), 15000);
@@ -124,14 +87,12 @@ test("thread switch survives a dangling writer lock: unload -> resume retry -> s
     });
   });
 
-    const threadId = `sw-${crypto.randomUUID()}`;
-  // The client asks for a specific thread; the first resume is rejected with
-  // the writer lock error, the bridge must unload + retry and then deliver.
+  const threadId = `sw-${crypto.randomUUID()}`;
   const ws = new WebSocket(`ws://127.0.0.1:${port}/bridge?thread=${threadId}&token=${TOKEN}`, { perMessageDeflate: false });
   const events = [];
   await new Promise((resolve, reject) => {
     const poll = setInterval(() => {
-      if (events.some((event) => event.type === "history.snapshot" && event.threadId === threadId)) {
+      if (events.some((event) => event.type === "error" && /其他 Codex 客户端占用/.test(event.text || ""))) {
         clearInterval(poll);
         resolve();
       }
@@ -150,17 +111,19 @@ test("thread switch survives a dangling writer lock: unload -> resume retry -> s
     });
     setTimeout(() => {
       clearInterval(poll);
-      reject(new Error(`no snapshot for switched thread; events=${JSON.stringify(events.map((e) => e.type))}; log=${bridgeLog.join("").slice(-800)}`));
+      reject(new Error(`no actionable writer-lock error; events=${JSON.stringify(events.map((e) => e.type))}; log=${bridgeLog.join("").slice(-800)}`));
     }, 12000);
   }).finally(() => ws.close());
-  
-    assert.ok(
-    events.some((e) => e.type === "ready" && e.threadId === threadId),
-    "ready carries the resumed thread id",
+
+  // Exactly one resume attempt against the occupied thread — no retries.
+  assert.equal(fake.script.resumeAttempts, 1, "resume attempted exactly once for a locked thread");
+  // Honesty over fake success: no ready/snapshot for a thread we cannot own.
+  assert.ok(
+    !events.some((e) => e.type === "ready" && e.threadId === threadId),
+    "no ready for a locked thread",
   );
-  assert.ok(fake.script.sawUnload, "dangling writer was unloaded before the retry");
-  assert.equal(fake.script.resumeAttempts, 2, "resume attempted exactly twice (initial + retry)");
-    // Deterministic teardown: the bridge owns client sockets on the fake server,
+
+  // Deterministic teardown: the bridge owns client sockets on the fake server,
   // so the fake can only close AFTER the bridge is gone (a naive pair of
   // t.after hooks deadlocks on that ordering).
   child.kill("SIGKILL");
