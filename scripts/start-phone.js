@@ -2019,7 +2019,10 @@ class SharedBridge {
         if (this.seenCommands.size > 1000) this.seenCommands.clear();
         this.seenCommands.add(item.commandId);
       }
-      this.prompt(item.text, item.attachments, item.options, null);
+      // Keep the commandId: the queued prompt's user echo must carry it so the
+      // client can link (and clear) its pending command. Losing it here is what
+      // leaves a "已接受" chip stuck forever after a bridge restart.
+      this.prompt(item.text, item.attachments, item.options, item.commandId || null);
     }
   }
 

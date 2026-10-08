@@ -48,12 +48,35 @@ function initGitRepo(dir) {
 }
 
 async function startBridge(workdir) {
+  // Fake claude CLI: tests must never touch the real provider/account. It
+  // replies once to whatever arrives on stdin and exits, which also releases
+  // queued turns quickly. Written OUTSIDE the workdir: an untracked file in
+  // the audited tree would flip review contract semantics.
+  const fakeClaude = path.join(os.tmpdir(), `contract-fake-claude-${process.pid}.cjs`);
+  fs.writeFileSync(
+    fakeClaude,
+    `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({type:"system",subtype:"init",session_id:"sess-fake-1"})+"\\n");
+const send = () => {
+  process.stdout.write(JSON.stringify({type:"assistant",message:{role:"assistant",content:[{type:"text",text:"fake ok"}]}})+"\\n");
+  process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:false,result:"fake ok"})+"\\n");
+  process.exit(0);
+};
+let got = false;
+process.stdin.on("data", (d) => { if (!got && String(d).trim().length) { got = true; send(); } });
+process.stdin.on("end", () => { if (!got) send(); });
+setTimeout(() => { if (!got) send(); }, 8000);
+`,
+    { mode: 0o755 },
+  );
+
   const port = 30000 + Math.floor(Math.random() * 20000);
   const child = spawn(process.execPath, [path.join(__dirname, "start-phone.js")], {
     cwd: path.join(__dirname, ".."),
     env: {
       ...process.env,
       PHONE_AGENT_PROVIDER: "claude",
+      CLAUDE_BIN: fakeClaude,
       PHONE_TOKEN: TOKEN,
       PHONE_UI_PORT: String(port),
       PHONE_WORKDIR: workdir,
@@ -295,4 +318,49 @@ test("ws prompt loop: command acks, user echo carries commandId, process survive
   // And the error path: a bogus provider-missing turn degrades, not dies.
   // (Already covered indirectly: in the fixture env the CLI is absent, so the
   // run fails via run.error; the socket-level contract above is the point.)
+});
+
+// C4: a command sent while the bridge is busy must keep its commandId through
+// the queue, so when it finally runs the echo still links and clears it.
+test("ws queued prompt keeps its commandId through the turn queue (C4)", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "contract-queue-"));
+  const bridge = await startBridge(dir);
+  t.after(() => bridge.stop());
+
+  const ws = new WebSocket(`ws://127.0.0.1:${bridge.port}/bridge?token=${TOKEN}`, { perMessageDeflate: false });
+  await new Promise((resolve, reject) => {
+    ws.on("open", resolve);
+    ws.on("error", reject);
+    setTimeout(() => reject(new Error("ws open timeout")), 8000);
+  });
+  const events = [];
+  ws.on("message", (data) => {
+    try {
+      events.push(JSON.parse(data.toString()));
+    } catch {
+      /* ignore */
+    }
+  });
+  // First prompt occupies the turn; the queued one must preserve its id.
+  ws.send(JSON.stringify({ type: "prompt", text: "first busy turn", commandId: "ws-q-1", token: TOKEN }));
+  ws.send(JSON.stringify({ type: "prompt", text: "queued turn", commandId: "ws-q-2", token: TOKEN }));
+
+  // In the fixture env the CLI spawn fails fast, releasing the queue; either
+  // way the queued command's echo must eventually carry its own commandId.
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("no queued echo with ws-q-2 within 12s")), 12000);
+    const check = setInterval(() => {
+      if (events.some((e) => e.type === "message.started" && e.role === "user" && e.commandId === "ws-q-2")) {
+        clearTimeout(timer);
+        clearInterval(check);
+        resolve();
+      }
+    }, 100);
+  });
+  const finished = events.filter((e) => e.type === "message.finished" && e.role === "user");
+  assert.ok(
+    finished.some((e) => e.commandId === "ws-q-2"),
+    "queued prompt echo carries the commandId",
+  );
+  ws.close();
 });
