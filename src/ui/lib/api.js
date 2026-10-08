@@ -171,6 +171,8 @@ export const api = {
   config: (opts) => apiGet("/api/config", opts),
   models: (opts) => apiGet("/api/models", opts),
   review: (opts) => apiGet("/api/review", opts),
+  reviewFile: (path, source, opts) =>
+    apiGet(`/api/review/file?path=${encodeURIComponent(path)}&source=${encodeURIComponent(source || "working tree")}`, opts),
   workspace: (limit = 180, opts) => apiGet(`/api/workspace?limit=${limit}`, opts),
   artifacts: (opts) => apiGet("/api/artifacts", opts),
   file: (path, opts) => apiGet(`/api/file?path=${encodeURIComponent(path)}`, opts).then(normalizeFilePreview),

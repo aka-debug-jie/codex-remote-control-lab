@@ -161,6 +161,53 @@ test("/api/review wire contract: working tree vs latest commit semantics", async
   assert.equal(committed.source, "latest commit");
 });
 
+test("/api/review/file wire contract: worktree/HEAD/binary/truncated (D2)", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "contract-diff-"));
+  fs.writeFileSync(path.join(dir, "code.txt"), "line\n");
+  const git = initGitRepo(dir);
+  git(["add", "code.txt"]);
+  git(["commit", "-m", "init"]);
+  const bridge = await startBridge(dir);
+  t.after(() => bridge.stop());
+  const diffPath = (p, source) => `/api/review/file?path=${encodeURIComponent(p)}&source=${encodeURIComponent(source)}`;
+
+  // No ability to fake auth via cookie here; token auth is fine for contracts.
+  fs.writeFileSync(path.join(dir, "code.txt"), "line\nline2\n");
+  const worktree = JSON.parse((await request(bridge.port, { path: diffPath("code.txt", "working tree") })).body);
+  void worktree;
+  const authed = await request(bridge.port, { path: `${diffPath("code.txt", "working tree")}&token=${TOKEN}` });
+  const body = JSON.parse(authed.body);
+  assert.equal(body.source, "working tree");
+  assert.match(body.patch, /^\+\+\+ b\/code\.txt$/m);
+  assert.match(body.patch, /\+line2$/m);
+  assert.equal(body.truncated, false);
+
+  // HEAD source shows the initial commit's introduction of code.txt.
+  const head = JSON.parse((await request(bridge.port, { path: `${diffPath("code.txt", "latest commit")}&token=${TOKEN}` })).body);
+  assert.equal(head.source, "latest commit");
+  assert.match(head.patch, /^\+\+\+ b\/code\.txt$/m);
+
+  // Untracked (not openable) file produced a worktree patch as well.
+  fs.writeFileSync(path.join(dir, "new.txt"), "brand new\n");
+  const untracked = JSON.parse((await request(bridge.port, { path: `${diffPath("new.txt", "working tree")}&token=${TOKEN}` })).body);
+  assert.match(untracked.patch, /^\+\+\+ b\/new\.txt$/m);
+
+  // Binary file: binary=true and no patch text.
+  fs.writeFileSync(path.join(dir, "blob.bin"), PNG_1PX);
+  const binary = JSON.parse((await request(bridge.port, { path: `${diffPath("blob.bin", "working tree")}&token=${TOKEN}` })).body);
+  assert.equal(binary.binary, true);
+  assert.equal(binary.patch, "");
+
+  // Truncation flag on oversized patches.
+  fs.writeFileSync(path.join(dir, "huge.txt"), "x".repeat(60_000) + "\n" + "y".repeat(60_000) + "\n");
+  const huge = JSON.parse((await request(bridge.port, { path: `${diffPath("huge.txt", "working tree")}&token=${TOKEN}` })).body);
+  assert.equal(huge.truncated, true);
+  assert.ok(huge.patch.length <= 21_000);
+
+  // Unauthorized reads are rejected.
+  assert.equal((await request(bridge.port, { path: diffPath("code.txt", "working tree") })).status, 401);
+});
+
 test("unauthenticated or wrongly authed file reads are rejected", async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "contract-file-"));
   fs.writeFileSync(path.join(dir, "secret.txt"), "s");

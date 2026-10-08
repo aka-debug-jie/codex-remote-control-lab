@@ -56,6 +56,9 @@ export function PanelsSheet({
   const fileAbortRef = useRef(null);
   const openRef = useRef(open);
   openRef.current = open;
+  // Source of the last review panel load, so a Diff button on the plain-file
+  // preview asks the same baseline (working tree vs HEAD).
+  const reviewSourceRef = useRef("working tree");
 
   // Historical artifacts for the (sync) artifacts panel; the array identity is
   // meaningful so a new artifact list triggers exactly one refresh.
@@ -75,6 +78,33 @@ export function PanelsSheet({
       setPreview(file);
     } catch (e) {
       if (isAbortError(e) || !isCurrent()) return;
+      setError(e.message);
+    }
+  }, []);
+
+  // Read-only per-file git diff (D2 small loop): worktree or HEAD source.
+  const openDiff = useCallback(async (path, source) => {
+    if (fileAbortRef.current) fileAbortRef.current.abort();
+    const controller = new AbortController();
+    fileAbortRef.current = controller;
+    const gen = ++fileGenRef.current;
+    const isCurrent = () => fileGenRef.current === gen && !controller.signal.aborted && openRef.current;
+    setError("");
+    setPreview({ kind: "diff", path, source: source || "working tree", patch: "", loading: true });
+    try {
+      const result = await api.reviewFile(path, source, { signal: controller.signal });
+      if (!isCurrent()) return;
+      setPreview({
+        kind: "diff",
+        path,
+        source: result.source || source || "working tree",
+        patch: result.patch || "",
+        binary: Boolean(result.binary),
+        truncated: Boolean(result.truncated),
+      });
+    } catch (e) {
+      if (isAbortError(e) || !isCurrent()) return;
+      setPreview(null);
       setError(e.message);
     }
   }, []);
@@ -100,7 +130,6 @@ export function PanelsSheet({
     }
     setLoading(true);
     setError("");
-
     const applyPanel = (nextTitle, nextRows) => {
       if (!isCurrent()) return;
       setTitle(nextTitle);
@@ -142,11 +171,22 @@ export function PanelsSheet({
           } else {
             const list = [];
             const source = result.displaySource || result.source || "working tree";
+            reviewSourceRef.current = source;
             const isLatest = source === "latest commit";
             list.push({ key: "branch", text: "分支", detail: result.branch || "unknown", icon: "G" });
             list.push({ key: "source", text: "来源", detail: isLatest ? "最近提交（工作树无更改）" : "工作树（未提交改动）", icon: "◈" });
             (result.stat || []).forEach((line, i) => list.push({ key: `s${i}`, text: line.trim(), icon: "Σ" }));
-            (result.files || []).forEach((file) => list.push({ key: file.path, text: file.path, detail: file.status, icon: file.status || "MOD", onClick: () => (file.openable ? openFile(file.path) : appendToPrompt(`审查目标：${file.path}`)) }));
+            (result.files || []).forEach((file) =>
+              list.push({
+                key: file.path,
+                text: file.path,
+                detail: file.status,
+                icon: file.status || "MOD",
+                onClick: () =>
+                  file.openable
+                    ? openDiff(file.path, source)
+                    : appendToPrompt(`审查目标：${file.path}`),
+              }));
             applyPanel(
               isLatest
                 ? `审查（最近提交 ${(result.files || []).length} 处）`
@@ -291,10 +331,39 @@ export function PanelsSheet({
             {preview ? (
               <div id="artifactPreview" className="artifact-preview">
                 <div className="artifact-preview-header">
-                  <span>{preview.path || preview.name}</span>
-                  <button type="button" className="text-btn" onClick={() => setPreview(null)}>关闭</button>
+                  <span>
+                    {preview.path || preview.name}
+                    {preview.kind === "diff" ? (
+                      <small className="artifact-preview-source">
+                        {" "}
+                        · {preview.source === "latest commit" ? "HEAD 补丁" : "工作树补丁"}
+                      </small>
+                    ) : null}
+                  </span>
+                  <span className="artifact-preview-header-actions">
+                    {preview.kind === "diff" && preview.path ? (
+                      <button type="button" className="text-btn" onClick={() => openFile(preview.path)}>
+                        完整文件
+                      </button>
+                    ) : null}
+                    {preview.kind !== "diff" && preview.path ? (
+                      <button type="button" className="text-btn" onClick={() => openDiff(preview.path, reviewSourceRef.current)}>
+                        Diff
+                      </button>
+                    ) : null}
+                    <button type="button" className="text-btn" onClick={() => setPreview(null)}>关闭</button>
+                  </span>
                 </div>
-                {preview.kind === "image" || preview.url ? (
+                {preview.kind === "diff" ? (
+                  preview.binary ? (
+                    <pre>二进制文件，无法显示 patch</pre>
+                  ) : (
+                    <>
+                      <pre className="diff-patch">{preview.loading ? "计算 diff…" : preview.patch || "（无差异）"}</pre>
+                      {preview.truncated ? <p className="artifact-preview-note">patch 过大，已截断显示</p> : null}
+                    </>
+                  )
+                ) : preview.kind === "image" || preview.url ? (
                   <img src={authedUrl(preview.url) || preview.url} alt={preview.path || "preview"} />
                 ) : (
                   <>

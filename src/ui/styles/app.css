@@ -1517,6 +1517,21 @@ button.secondary {
   max-width: 100%;
   border-radius: var(--shape-md);
 }
+.artifact-preview-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+.artifact-preview-source {
+  color: var(--on-surface-variant);
+  font-size: var(--text-caption);
+}
+.diff-patch {
+  font-size: 0.72em !important;
+  white-space: pre;
+  overflow-x: auto;
+}
 .artifact-preview pre {
   max-height: 40vh;
   overflow: auto;

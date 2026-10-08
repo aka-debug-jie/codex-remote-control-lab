@@ -998,7 +998,7 @@ async function discoverWorkspaceEntries({ limit = 200, query = "" } = {}) {
   return entries;
 }
 
-function runGit(args) {
+function runGit(args, { allowNonZeroExit = false } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn("git", args, {
       cwd: workdir,
@@ -1025,7 +1025,9 @@ function runGit(args) {
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (code !== 0) {
+      // `git diff --no-index` exits 1 whenever differences exist — masquerade
+      // as success so untracked patches can use it.
+      if (code !== 0 && !(allowNonZeroExit && code === 1)) {
         reject(new Error((stderr || stdout || `git ${args.join(" ")} failed`).trim()));
         return;
       }
@@ -2832,6 +2834,45 @@ async function main() {
       if (!requireToken(req, url, phoneToken, res)) return;
       try {
         sendJson(req, res, 200, await reviewSummary());
+      } catch (error) {
+        sendJson(req, res, 500, { error: error.message });
+      }
+      return;
+    }
+    if (url.pathname === "/api/review/file") {
+      if (!requireToken(req, url, phoneToken, res)) return;
+      const relPath = String(url.searchParams.get("path") || "");
+      const source = url.searchParams.get("source") === "latest commit" ? "latest commit" : "working tree";
+      const target = safeRelativePath(relPath);
+      if (!target) {
+        sendJson(req, res, 400, { error: "invalid path" });
+        return;
+      }
+      try {
+        // git args never embed user input outside `--` separated operands.
+        const args =
+          source === "latest commit"
+            ? ["show", "--format=", "--no-renames", "HEAD", "--", relPath]
+            : ["diff", "--no-renames", "HEAD", "--", relPath];
+        let full = await runGit(args);
+        // `git diff` skips untracked files; emit their content as a new-file
+        // patch so an untracked review row still shows something meaningful.
+        if (source === "working tree" && !full) {
+          const statusLine = await runGit(["status", "--porcelain=v1", "--", relPath]);
+          if (statusLine.startsWith("??")) {
+            full = await runGit(["diff", "--no-index", "--no-renames", "/dev/null", relPath], { allowNonZeroExit: true });
+          }
+        }
+        const binary = /^Binary files .* differ$/m.test(full);
+        const MAX_PATCH = 20_000;
+        const truncated = full.length > MAX_PATCH;
+        sendJson(req, res, 200, {
+          path: target,
+          source,
+          binary,
+          truncated,
+          patch: binary ? "" : truncated ? `${full.slice(0, MAX_PATCH)}\n…（已截断）` : full,
+        });
       } catch (error) {
         sendJson(req, res, 500, { error: error.message });
       }

@@ -64,6 +64,7 @@ async function mockApi(page, state = {}) {
     if (url.pathname === "/api/threads") return respond({ data: state.threads || [], threads: state.threads || [] });
     if (url.pathname === "/api/thread") return respond(state.threadSnapshots?.[url.searchParams.get("thread")] || { threadId: url.searchParams.get("thread"), history: [] });
     if (url.pathname === "/api/review") return respond(state.review || { clean: true, files: [], source: "working tree" });
+    if (url.pathname === "/api/review/file") return respond(state.reviewFile || { path: url.searchParams.get("path"), source: url.searchParams.get("source") || "working tree", binary: false, truncated: false, patch: "" });
     if (url.pathname === "/api/skills") return respond({ data: state.skills || [] });
     if (url.pathname === "/api/models") return respond({ data: state.models || [] });
     if (url.pathname === "/api/plugins") return respond(state.plugins || { marketplaces: [] });
@@ -456,6 +457,32 @@ test("prompt modal close and Escape cancel without applying; only 应用 commits
   await page.click("#applyPromptModalButton");
   await page.waitForTimeout(200);
   assert.equal(await page.inputValue("#prompt"), "中途改动");
+});
+
+test("review panel file rows open a read-only diff preview (D2)", async (t) => {
+  const { page } = await boot(t, {
+    apiState: {
+      review: {
+        branch: "main",
+        clean: false,
+        source: "working tree",
+        stat: [" 1 file changed"],
+        files: [{ path: "code.txt", status: "M", openable: true }],
+        totals: { additions: 1, deletions: 0 },
+      },
+      reviewFile: { path: "code.txt", source: "working tree", binary: false, truncated: false, patch: "+++ b/code.txt\n+line2\n" },
+    },
+  });
+  await page.click("#menuButton");
+  await page.waitForSelector(".bottom-sheet.open");
+  await page.click("#reviewTab");
+  await page.locator('.list-row:has-text("code.txt")').click();
+  await page.waitForSelector("#artifactPreview .diff-patch");
+  assert.match(await page.locator("#artifactPreview .diff-patch").innerText(), /\+line2/);
+  assert.match(await page.locator("#artifactPreview").innerText(), /工作树补丁/);
+  // Switch to the full-file view from the diff preview.
+  await page.locator('#artifactPreview .artifact-preview-header .text-btn:has-text("完整文件")').click();
+  await page.waitForSelector('#artifactPreview pre:not(.diff-patch)');
 });
 
 test("fullscreen prompt dialog traps Tab focus", async (t) => {
