@@ -348,6 +348,13 @@ export function applyEvent(state, event) {
       });
       return next;
     }
+    case "command.dispatched": {
+      next.commands = upsertCommand(next.commands, event.commandId, {
+        status: "dispatched",
+        turnId: event.turnId ?? null,
+      });
+      return next;
+    }
     case "command.accepted": {
       next.commands = upsertCommand(next.commands, event.commandId, {
         status: event.queued ? "queued" : "accepted",

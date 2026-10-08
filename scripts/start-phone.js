@@ -1518,7 +1518,11 @@ class SharedBridge {
     this.clients = new Set();
     this.nextId = 1;
     this.pending = new Map();
+    // request id -> user commandId, so the turn/start response can transition
+    // the command through dispatched (accepted-by-upstream) or rejected.
+    this.pendingCommandByRequest = new Map();
     this.threadId = null;
+    this.pendingCommandByRequest = new Map();
     this.activeTurnId = null;
     this.ready = false;
     this.startupFailed = false;
@@ -1820,6 +1824,8 @@ class SharedBridge {
 
       if (pendingMethod === "turn/start") {
         this.pending.delete(msg.id);
+        const dispatchedCommandId = this.pendingCommandByRequest.get(msg.id);
+        this.pendingCommandByRequest.delete(msg.id);
         if (msg.error) {
           this.interruptRequested = false;
           const problem = normalizeCodexProblem(msg.error);
@@ -1828,12 +1834,19 @@ class SharedBridge {
           if (problem.severity === "error") {
             this.setBridgeRunState("error", "启动失败", this.activeTurnId);
             notifyRunEvent("failed", { threadId: this.threadId || problem.threadId, message: problem.text });
+            // The turn will never run: release any linked command honestly.
+            if (dispatchedCommandId) {
+              this.emitEvent({ type: "command.rejected", commandId: dispatchedCommandId, reason: problem.text || "turn-start-failed" });
+            }
           }
           if (problem.severity === "error") this.startNextQueuedTurn();
         } else {
           this.activeTurnId = msg.result.turn.id;
           this.streamingStarted = false;
           this.codexState.turnId = this.activeTurnId;
+          if (dispatchedCommandId) {
+            this.emitEvent({ type: "command.dispatched", commandId: dispatchedCommandId, turnId: this.activeTurnId });
+          }
           this.emitEvent({ type: "run.started", turnId: this.activeTurnId });
           this.setBridgeRunState("running", "Codex 处理中", this.activeTurnId);
           if (this.interruptRequested) this.setBridgeRunState("interrupting", "启动后中断", this.activeTurnId);
@@ -2059,6 +2072,7 @@ class SharedBridge {
     });
     if (!id) return;
     this.pending.set(id, "turn/start");
+    if (commandId) this.pendingCommandByRequest.set(id, commandId);
     this.setBridgeRunState("running", "Codex 处理中");
     const displayText = savedImages.length ? `${text}\n\n附件：${savedImages.map((image) => image.name).join(", ")}` : text;
     this.appendHistory({ type: "user", text: displayText, attachments: savedImages });
@@ -2126,6 +2140,8 @@ class ClaudeBridge {
     this.pendingApprovals = new Map();
     this.usage = null;
     this.seenCommands = new Set();
+    // Turn ids that already emitted a terminal run state (single-terminal guard).
+    this.runsTerminal = new Set();
     this.detachPolicy = createDetachPolicy({
       graceMs: detachGraceMs,
       isBusy: () => Boolean(this.activeTurnId || this.activeProcess || this.turnQueue.length),
@@ -2302,6 +2318,9 @@ class ClaudeBridge {
     this.activeTurnId = turnId;
     this.streamingStarted = false;
     this.appendHistory({ type: "user", text: displayText, attachments: savedImages });
+    if (commandId) {
+      this.emitEvent({ type: "command.dispatched", commandId, turnId });
+    }
     this.emitEvent({ type: "message.started", messageId: `user:${turnId}`, role: "user", turnId, commandId });
     this.emitEvent({ type: "message.finished", messageId: `user:${turnId}`, role: "user", text: displayText, attachments: savedImages, commandId });
     this.emitEvent({ type: "run.started", turnId, commandId });
@@ -2343,6 +2362,15 @@ class ClaudeBridge {
       this.activeTurnId = null;
       this.streamingStarted = false;
       return true;
+    };
+
+    // One terminal state per turn: the CLI "result" event and the process exit
+    // both fire; only the first run.finished reaches clients (B01/C3).
+    const finishRun = (status) => {
+      if (this.runsTerminal.has(turnId)) return;
+      if (this.runsTerminal.size > 200) this.runsTerminal.clear();
+      this.runsTerminal.add(turnId);
+      this.emitEvent({ type: "run.finished", turnId, status });
     };
 
     const handleLine = (line) => {
@@ -2408,11 +2436,12 @@ class ClaudeBridge {
       if (stdoutBuffer.trim()) handleLine(stdoutBuffer);
       if (code === 0) {
         if (assistantText.trim()) this.appendHistory({ type: "assistant", text: assistantText, outputGroup: turnId });
-        this.emitEvent({ type: "run.finished", turnId, status: "completed" });
+        finishRun("completed");
       } else {
         const reason = signal ? `signal=${signal}` : `code=${code}`;
         const message = `Claude process exited (${reason})${stderrBuffer.trim() ? `: ${stderrBuffer.trim().slice(-1000)}` : ""}`;
         this.emit("error", { text: message });
+        finishRun("failed");
       }
       this.startNextQueuedTurn();
     });

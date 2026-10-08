@@ -8,6 +8,7 @@ const COMMAND_STATUS_TEXT = {
   queued: "排队中，等待连接…",
   awaitingAck: "已发送，等待确认…",
   accepted: "已接受，正在处理",
+  dispatched: "已交付上游，处理中",
   rejected: "发送失败",
   unknown: "结果未确认",
 };
