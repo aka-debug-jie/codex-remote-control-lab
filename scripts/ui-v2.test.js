@@ -393,6 +393,51 @@ test("approval always-allow sends decision accept with always flag", async (t) =
   assert.equal(approval.always, true);
 });
 
+test("approval card stays until the server resolves it, then a rejected submit shows failed", async (t) => {
+  const { page } = await boot(t);
+  await page.evaluate(() => {
+    window.__dispatchServerMessage({
+      type: "approval.requested",
+      approvalId: 9,
+      request: { id: 9, method: "item/commandExecution/requestApproval", params: { command: "rm -rf build" } },
+      seq: 1,
+    });
+  });
+  await page.waitForSelector(".approval");
+  await page.locator('.approval button:has-text("批准")').click();
+  // The local click must NOT remove the card; it enters a submitting state.
+  await page.waitForSelector(".approval-approval\\.submitting, .approval.approval-submitting");
+  assert.equal(await page.locator(".approval").count(), 1);
+  assert.ok(await page.locator('.approval button:has-text("批准")').isDisabled());
+  // Server's authoritative resolution removes the card.
+  await page.evaluate(() => window.__dispatchServerMessage({ type: "approval.resolved", approvalId: 9, seq: 2 }));
+  await page.waitForTimeout(150);
+  assert.equal(await page.locator(".approval").count(), 0);
+});
+
+test("approval submit rejection marks the card failed and re-enables buttons", async (t) => {
+  const { page } = await boot(t);
+  await page.evaluate(() => {
+    window.__dispatchServerMessage({
+      type: "approval.requested",
+      approvalId: 11,
+      request: { id: 11, method: "item/commandExecution/requestApproval", params: {} },
+      seq: 1,
+    });
+  });
+  await page.waitForSelector(".approval");
+  await page.locator('.approval button:has-text("批准")').click();
+  const cmdId = await page.evaluate(() => (window.__sentFrames.find((f) => f.type === "approval") || {}).commandId);
+  assert.ok(cmdId, "approval carries a commandId");
+  await page.evaluate(
+    (id) => window.__dispatchServerMessage({ type: "command.rejected", commandId: id, reason: "unsupported-by-provider" }),
+    cmdId,
+  );
+  await page.waitForSelector(".approval .approval-badge.error");
+  assert.match(await page.locator(".approval .approval-badge.error").innerText(), /unsupported-by-provider/);
+  assert.equal(await page.locator('.approval button:has-text("批准")').isDisabled(), false);
+});
+
 test("retry on a user message re-sends it; edit fills the composer", async (t) => {
   const { page } = await boot(t, {
     ws: {

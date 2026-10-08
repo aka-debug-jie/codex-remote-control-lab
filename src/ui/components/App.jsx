@@ -254,8 +254,10 @@ export function App() {
     tap();
     const always = action === "always";
     const decision = action === "decline" ? "decline" : "accept";
-    connection.send({ type: "approval", request: approval.request, decision, always });
-    store.dispatch({ type: "approval.resolved", approvalId: approval.approvalId });
+    // The card stays visible in a "submitting" state until the server's own
+    // approval.resolved arrives; a rejected submit command flips it to failed.
+    const commandId = connection.send({ type: "approval", request: approval.request, decision, always });
+    store.dispatch({ type: "approval.submitting", approvalId: approval.approvalId, commandId });
   }, []);
 
   const cycleAccess = useCallback(() => {
@@ -354,7 +356,12 @@ export function App() {
             />
             <UsageBadge />
             {approvals.map((approval) => (
-              <ApprovalCard key={approval.approvalId} approval={approval} onDecision={decide} />
+              <ApprovalCard
+                key={approval.approvalId}
+                approval={approval}
+                onDecision={decide}
+                allowAlways={(meta.provider || provider) === "codex"}
+              />
             ))}
             <div className="composer-stack">
               <Composer

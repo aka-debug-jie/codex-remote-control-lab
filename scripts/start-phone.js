@@ -2083,11 +2083,14 @@ class SharedBridge {
   }
 
   approval(requestMsg, decision, always = false) {
-    if (!requestMsg || !requestMsg.id || !requestMsg.method) return;
+    if (!requestMsg || !requestMsg.id || !requestMsg.method) {
+      return { status: "rejected", reason: "invalid-approval-request" };
+    }
     if (always) this.approvalAlways = true;
     const accept = decision === "accept" || decision === "approve" || always;
     this.respondApproval(requestMsg, accept);
     this.emit("status", { text: accept ? (always ? "已批准（本会话始终允许）" : "已批准") : "已拒绝" });
+    return { status: "accepted" };
   }
 }
 
@@ -2399,6 +2402,7 @@ class ClaudeBridge {
 
   approval() {
     this.emit("status", { text: "Claude headless provider 暂不支持运行中的审批响应。" });
+    return { status: "rejected", reason: "unsupported-by-provider" };
   }
 }
 
@@ -2454,8 +2458,12 @@ function bindBrowser(browser, phoneToken, threadId, cookieAuthorized = false) {
       if (msg.commandId) bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId });
     }
     if (msg.type === "approval") {
-      bridge.approval(msg.request, msg.decision, msg.always);
-      if (msg.commandId) bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId });
+      const result = bridge.approval(msg.request, msg.decision, msg.always);
+      if (msg.commandId && result && result.status === "rejected") {
+        bridge.emitTo(browser, "command.rejected", { commandId: msg.commandId, reason: result.reason || "rejected" });
+      } else if (msg.commandId) {
+        bridge.emitTo(browser, "command.accepted", { commandId: msg.commandId });
+      }
     }
   });
 }

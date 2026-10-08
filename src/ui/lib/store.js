@@ -303,12 +303,25 @@ export function applyEvent(state, event) {
       return next;
     }
     case "approval.requested": {
-      const approval = { approvalId: event.approvalId, request: event.request };
-      next.approvals = [...next.approvals, approval];
+      const approval = { approvalId: event.approvalId, request: event.request, status: "requested" };
+      next.approvals = [...next.approvals.filter((a) => a.approvalId !== event.approvalId), approval];
       next.run = { state: "approval", label: runStateText.approval, turnId: next.run.turnId };
       return next;
     }
+    case "approval.submitting": {
+      next.approvals = next.approvals.map((a) =>
+        a.approvalId === event.approvalId ? { ...a, status: "submitting", commandId: event.commandId } : a,
+      );
+      return next;
+    }
+    case "approval.failed": {
+      next.approvals = next.approvals.map((a) =>
+        a.approvalId === event.approvalId ? { ...a, status: "failed", reason: event.reason || "未知原因" } : a,
+      );
+      return next;
+    }
     case "approval.resolved": {
+      // Only the server's authoritative resolution removes a card.
       next.approvals = next.approvals.filter((a) => a.approvalId !== event.approvalId);
       return next;
     }
@@ -358,6 +371,13 @@ export function applyEvent(state, event) {
         status: "rejected",
         reason: event.reason || "未知原因",
       });
+      // An approval whose submit command was rejected returns to an actionable
+      // failed state instead of silently disappearing.
+      next.approvals = next.approvals.map((a) =>
+        a.commandId && a.commandId === event.commandId
+          ? { ...a, status: "failed", reason: event.reason || "未知原因" }
+          : a,
+      );
       next.notices = [
         ...next.notices,
         { id: `cr:${event.commandId || next.seq}`, kind: "error", text: `发送未被接受：${event.reason || "未知原因"}` },
