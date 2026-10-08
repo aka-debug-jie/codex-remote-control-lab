@@ -107,6 +107,17 @@ The bridge serves hashed `/assets/*` with a one-year immutable cache and
 brotli/gzip compression, re-validates `index.html`/`sw.js`, and sends a
 Content-Security-Policy plus `nosniff`/`no-referrer` headers (`scripts/static-serve.js`).
 
+Session auth: the first visit exchanges the bridge token for an HttpOnly
+`codex_session` cookie via `POST /api/auth` (CSRF-guarded by the
+`X-Codex-Client` header); the raw token is then stripped from the URL and the
+WebSocket is cookie-authenticated. The persisted secret lives in
+`.phone-session` (env: `PHONE_SESSION_FILE`) and is gitignored.
+
+Bridge lifecycle: when the phone leaves (last client disconnects) the bridge
+survives a grace window — `PHONE_DETACH_GRACE_MS`, default 120s — and a result
+still streaming keeps it alive longer; disposal happens only once the bridge
+is idle. Set it to `0` for the legacy kill-on-disconnect behavior.
+
 Protocol-only smoke test:
 
 ```bash

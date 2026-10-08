@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
 
 permissions:
@@ -30,10 +30,14 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install chromium
 
+      # Build/syntax/docs runs once on the primary Node version; the secondary
+      # version runs the full test suite against the already-built bundle.
       - name: Build UI bundle
+        if: matrix.node-version == 22
         run: npm run build:ui
 
       - name: Check JavaScript syntax & bundle
+        if: matrix.node-version == 22
         run: npm run check
 
       - name: Run tests
@@ -43,4 +47,5 @@ jobs:
         run: npm audit --omit=dev
 
       - name: Build docs
+        if: matrix.node-version == 22
         run: npm run docs:build
