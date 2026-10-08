@@ -78,10 +78,12 @@ function upsertCommand(commands, commandId, patch) {
   if (index < 0) {
     return [...commands, { commandId, status: "queued", createdAt: Date.now(), ...patch }];
   }
-  // A command already linked to its authoritative user echo must never be
-  // resurrected by later bookkeeping frames (accepted/dispatched/sent all race
-  // behind the echo on real devices).
-  if (commands[index].status === "linked") return commands;
+  // A command already linked to its authoritative user echo must not be
+  // resurrected by later bookkeeping frames (accepted/dispatched/sent race
+  // behind the echo on real devices) — EXCEPT a rejection: the linked turn
+  // itself being refused by turn/start must return the command to a visible,
+  // recoverable failure state.
+  if (commands[index].status === "linked" && patch.status !== "rejected") return commands;
   const next = commands.slice();
   next[index] = { ...next[index], ...patch };
   return next;
@@ -238,6 +240,12 @@ export function applyEvent(state, event) {
         turnId: event.turnId || null,
         durationMs: event.durationMs ?? null,
       };
+      // A finished run resolves every in-flight status chip for commands that
+      // belong to it — otherwise 已接受/已交付上游 accumulate forever (approval
+      // decisions, interrupts included; a rejected/unknown state still shows).
+      next.commands = next.commands.map((c) =>
+        c && c.status !== "rejected" && c.status !== "unknown" ? { ...c, status: "linked" } : c,
+      );
       next.activeAssistantId = null;
       if (failed) {
         next.notices = [...next.notices, { id: `rf:${event.turnId || next.seq}`, kind: "error", text: "任务失败" }].slice(-MAX_NOTICES);
@@ -359,7 +367,17 @@ export function applyEvent(state, event) {
     }
     case "approval.resolved": {
       // Only the server's authoritative resolution removes a card.
+      const resolved = next.approvals.find((a) => a.approvalId === event.approvalId);
       next.approvals = next.approvals.filter((a) => a.approvalId !== event.approvalId);
+      // The approval decision's own command chip resolves with it — otherwise
+      // 已接受，正在处理 lingers after a successful 批准/拒绝.
+      if (resolved && resolved.commandId) {
+        next.commands = next.commands.map((c) =>
+          c.commandId === resolved.commandId && c.status !== "rejected" && c.status !== "unknown"
+            ? { ...c, status: "linked" }
+            : c,
+        );
+      }
       return next;
     }
     case "status": {

@@ -222,3 +222,98 @@ test("pre-ready prompt runs exactly once when the thread becomes ready", async (
 
   await teardown(child, fake);
 });
+
+// Regression: once the desktop client releases the writer lock, a NEW
+// connection to the previously FAILED bridge must retry resume and deliver
+// the snapshot — the failed object must not be cached forever.
+test("failed bridge retries resume for a newly attached client after the lock frees", async (t) => {
+  const script = { resumeAttempts: 0, turnStarts: 0 };
+  const wss = new WebSocketServer({ port: 0 });
+  await new Promise((r) => wss.on("listening", r));
+  const fakePort = wss.address().port;
+  const threadId = `sw-${crypto.randomUUID()}`;
+  wss.on("connection", (ws) => {
+    ws.on("message", (data) => {
+      let msg;
+      try { msg = JSON.parse(data.toString()); } catch { return; }
+      if (!msg.id) return;
+      if (msg.method === "initialize") {
+        ws.send(JSON.stringify({ id: msg.id, result: { ok: true } }));
+        return;
+      }
+      if (msg.method === "thread/loaded/list") {
+        ws.send(JSON.stringify({ id: msg.id, result: { data: [], nextCursor: null } }));
+        return;
+      }
+      if (msg.method === "thread/resume") {
+        script.resumeAttempts += 1;
+        // The desktop client holds the lock ONLY during the first attempt.
+        if (script.resumeAttempts === 1) {
+          ws.send(JSON.stringify({ id: msg.id, error: { code: -32600, message: `thread ${threadId} already has an active writer` } }));
+          return;
+        }
+        ws.send(JSON.stringify({ id: msg.id, result: { thread: { id: msg.params.threadId, turns: [] } } }));
+        return;
+      }
+      if (msg.method === "turn/start") {
+        script.turnStarts += 1;
+        ws.send(JSON.stringify({ id: msg.id, result: { turn: { id: `turn-${script.turnStarts}` } } }));
+        return;
+      }
+      ws.send(JSON.stringify({ id: msg.id, result: { ok: true } }));
+    });
+  });
+
+  const port = 30000 + Math.floor(Math.random() * 20000);
+  const env = {
+    ...process.env,
+    CODEX_APP_SERVER_URL: `ws://127.0.0.1:${fakePort}`,
+    PHONE_TOKEN: TOKEN,
+    PHONE_UI_PORT: String(port),
+    PHONE_WORKDIR: path.join(os.tmpdir(), `switch-wd-${port}`),
+    CODEX_WORKDIR: path.join(os.tmpdir(), `switch-wd-${port}`),
+    PHONE_SESSION_FILE: path.join(os.tmpdir(), `switch-session-${port}`),
+    PHONE_BIND_HOST: "127.0.0.1",
+    PHONE_DETACH_GRACE_MS: "500",
+  };
+  const child = spawn(process.execPath, [path.join(__dirname, "start-phone.js")], {
+    cwd: path.join(__dirname, ".."), env, stdio: ["ignore", "pipe", "pipe"],
+  });
+  const bridgeLog = [];
+  child.stdout.on("data", (c) => bridgeLog.push(c.toString()));
+  child.stderr.on("data", (c) => bridgeLog.push(c.toString()));
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`bridge did not start: ${bridgeLog.join("").slice(-400)}`)), 15000);
+    child.stdout.on("data", (c) => c.toString().includes("is ready") && (clearTimeout(timer), resolve()));
+  });
+
+  // First connection: resume rejected with the writer-lock error.
+  const ws1Events = [];
+  const ws1 = new WebSocket(`ws://127.0.0.1:${port}/bridge?thread=${threadId}&token=${TOKEN}`, { perMessageDeflate: false });
+  ws1.on("message", (d) => { try { ws1Events.push(JSON.parse(d.toString())); } catch {} });
+  await new Promise((resolve, reject) => {
+    const poll = setInterval(() => {
+      if (ws1Events.some((e) => e.type === "error" && /其他 Codex 客户端占用/.test(e.text || ""))) { clearInterval(poll); resolve(); }
+    }, 100);
+    ws1.on("error", (e) => { clearInterval(poll); reject(e); });
+    setTimeout(() => { clearInterval(poll); reject(new Error("no first-attempt writer error")); }, 10000);
+  }).finally(() => ws1.close());
+
+  // The lock frees; the user reconnects (new socket to the SAME failed bridge).
+  await new Promise((r) => setTimeout(r, 700)); // detach grace (0.5s) expires
+  const ws2Events = [];
+  const ws2 = new WebSocket(`ws://127.0.0.1:${port}/bridge?thread=${threadId}&token=${TOKEN}`, { perMessageDeflate: false });
+  ws2.on("message", (d) => { try { ws2Events.push(JSON.parse(d.toString())); } catch {} });
+  await new Promise((resolve, reject) => {
+    const poll = setInterval(() => {
+      if (ws2Events.some((e) => e.type === "history.snapshot" && e.threadId === threadId)) { clearInterval(poll); resolve(); }
+    }, 100);
+    ws2.on("error", (e) => { clearInterval(poll); reject(e); });
+    setTimeout(() => { clearInterval(poll); reject(new Error(`no snapshot after lock frees; attempts=${script.resumeAttempts}`)); }, 12000);
+  }).finally(() => ws2.close());
+
+  assert.equal(script.resumeAttempts, 2, "the freed lock yields a real second resume (no cached failure)");
+  child.kill("SIGKILL");
+  await new Promise((r) => child.once("exit", r));
+  await new Promise((resolve) => wss.close(resolve));
+});

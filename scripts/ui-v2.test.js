@@ -588,6 +588,47 @@ test("usage.updated renders the token badge", async (t) => {
   assert.match(await page.locator(".usage-badge").innerText(), /12\.0k/);
 });
 
+// Regression for 状态条不结束: dispatched chips (approval/interrupt included)
+// must resolve when the run reaches its terminal state, instead of stacking.
+test("run.finished resolves in-flight command chips", async (t) => {
+  const { page } = await boot(t);
+  await page.waitForFunction(() => document.querySelector("#runState")?.dataset.state === "ready");
+  // Simulate two in-flight commands (e.g. an approval + an interrupt).
+  await page.evaluate(() => {
+    window.__dispatchServerMessage({ type: "command.sent", commandId: "c-appr", status: "accepted" });
+    window.__dispatchServerMessage({ type: "command.dispatched", commandId: "c-notify", turnId: "t-run" });
+  });
+  await page.waitForSelector(".command-chip");
+  assert.ok((await page.locator(".command-chip").count()) >= 1);
+  await page.evaluate(() =>
+    window.__dispatchServerMessage({ type: "run.finished", turnId: "t-run", status: "completed", durationMs: 1200 }),
+  );
+  await page.waitForTimeout(250);
+  assert.equal(await page.locator(".command-chip").count(), 0, "terminal run clears all pending chips");
+});
+
+// Regression for Claude 草稿丢失: an EMPTY migrating codex draft must not
+// overwrite an existing claude draft saved for the same real thread.
+test("empty new-session draft migration preserves the existing thread draft", async (t) => {
+  const ready = {
+    type: "ready",
+    threadId: "thread-v2",
+    provider: "claude",
+    model: "sonnet",
+    clients: 1,
+    workdir: root,
+    run: { state: "ready", label: "空闲" },
+    history: [],
+  };
+  const { page } = await boot(t, {
+    ws: { defaultReadyPayload: ready, seedCache: { "codexPhoneDraft:claude:thread-v2": "claude 会话的老草稿" } },
+  });
+  await page.waitForFunction(() => document.querySelector("#runState")?.dataset.state === "ready");
+  await page.waitForTimeout(600); // draft effect + migration window
+  const value = await page.inputValue("#prompt");
+  assert.equal(value, "claude 会话的老草稿", "existing thread draft survives the provider switch");
+});
+
 test("run state label ticks live elapsed seconds while running", async (t) => {
   const { page } = await boot(t);
   await page.evaluate(() => window.__dispatchServerMessage({ type: "run.started", turnId: "tick-turn", seq: 4 }));
@@ -909,15 +950,12 @@ test("恢复输入 cancels the automatic resend of the original command", async 
   // User restores instead of waiting for the auto-resend.
   await page.locator(".command-chip.command-unknown .text-btn").click();
   assert.equal(await page.inputValue("#prompt"), "断线前的输入", "text restored to the composer");
-  const framesAfterRestore = await page.evaluate(() => (window.__sentFrames || []).length);
-  console.log("DBG frames before/after restore:", framesBeforeRestore, framesAfterRestore);
   await page.evaluate(() => document.querySelector("#connect")?.click());
   await page.waitForTimeout(1200);
   const afterRestore = await page.evaluate(
     (n) => (window.__sentFrames || []).slice(n).filter((f) => f.type === "prompt").map((f) => f.commandId),
     framesBeforeRestore,
   );
-  console.log("DBG afterRestore frames:", JSON.stringify(afterRestore));
   assert.ok(!afterRestore.includes(oldId), "restored command must not auto-resend after reconnect");
 });
 

@@ -1562,7 +1562,31 @@ class SharedBridge {
     this.bindUpstream();
   }
 
+  // A failed startup (e.g. the thread was write-locked by the desktop client)
+  // must not be cached forever: the next attaching client rebuilds the upstream
+  // and retries resume automatically ("解除写锁后重连仍卡住" fix).
+  restartUpstream() {
+    if (this.restartingUpstream) return;
+    this.restartingUpstream = true;
+    try {
+      if (this.upstream) this.upstream.close();
+    } catch {
+      /* ignore */
+    }
+    this.pending.clear();
+    clearTimeout(this.startupTimer);
+    this.startupTimer = null;
+    this.upstream = createUpstreamWebSocket();
+    this.bindUpstream();
+    this.restartingUpstream = false;
+  }
+
   addClient(browser) {
+    // `.clientCount` is used by the detach policy, below, and by tests.
+    if (this.startupFailed) {
+      console.log(`[codex-bridge ${this.bridgeKey}] client attached to a failed bridge; retrying resume`);
+      this.restartUpstream();
+    }
     this.clients.add(browser);
     this.emitTo(browser, "status", { text: "已加入共享 Codex bridge。" });
     // Only send a snapshot once the thread is actually loaded; otherwise the
@@ -2405,7 +2429,13 @@ class ClaudeBridge {
         this.promoteBridgeKey();
       }
       this.claudeState.turnId = turnId;
-      for (const event of normalizeClaudeMessage(msg, this.claudeState)) this.emitEvent(event);
+      for (const event of normalizeClaudeMessage(msg, this.claudeState)) {
+        // Stream-side terminal states must go through the same single-terminal
+        // guard as the process-exit path: a "result" followed by exit(0) used
+        // to overwrite a failed terminal with "completed" (Claude 双终态).
+        if (event.type === "run.finished") finishRun(event.status || "completed");
+        else this.emitEvent(event);
+      }
       if (msg.type === "system" && msg.subtype === "init") {
         this.emit("status", { text: `Claude session ready: ${msg.session_id || this.threadId}` });
         return;

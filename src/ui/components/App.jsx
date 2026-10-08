@@ -71,9 +71,11 @@ export function App() {
     saveDraft(prev.provider, prev.threadId, text);
     // When a "new" session gets its authoritative thread id, migrate the draft
     // instead of loading an empty one and wiping what the user just typed.
+    // An EMPTY migrating text must NOT overwrite an existing draft in the
+    // target bucket (e.g. a claude draft saved earlier): load it instead.
     const migratingNew = !prev.threadId && Boolean(next.threadId);
     draftKeyRef.current = next;
-    if (migratingNew) saveDraft(next.provider, next.threadId, text);
+    if (migratingNew && text.trim()) saveDraft(next.provider, next.threadId, text);
     else setPromptText(loadDraft(next.provider, next.threadId));
   }, [provider, meta.threadId]);
 
