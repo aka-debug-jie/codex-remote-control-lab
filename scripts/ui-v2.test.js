@@ -582,6 +582,26 @@ test("usage.updated renders the token badge", async (t) => {
   assert.match(await page.locator(".usage-badge").innerText(), /12\.0k/);
 });
 
+test("run state label ticks live elapsed seconds while running", async (t) => {
+  const { page } = await boot(t);
+  await page.evaluate(() => window.__dispatchServerMessage({ type: "run.started", turnId: "tick-turn", seq: 4 }));
+  await page.waitForFunction(() => /· \d+s$/.test(document.querySelector("#runStateLabel")?.textContent || ""), null, {
+    timeout: 4000,
+  });
+  // One second later the tick updates (not a frozen timestamp).
+  const v1 = await page.evaluate(() => document.querySelector("#runStateLabel").textContent);
+  await page.waitForFunction(
+    (prev) => document.querySelector("#runStateLabel").textContent !== prev,
+    v1,
+    { timeout: 4000 },
+  );
+  // Finish clears the live tick and shows the final duration instead.
+  await page.evaluate(
+    () => window.__dispatchServerMessage({ type: "run.finished", turnId: "tick-turn", status: "completed", durationMs: 2400, seq: 5 }),
+  );
+  await page.waitForFunction(() => /2\.4s$/.test(document.querySelector("#runStateLabel")?.textContent || ""));
+});
+
 test("run.finished shows the turn duration", async (t) => {
   const { page } = await boot(t);
   await page.evaluate(() => {

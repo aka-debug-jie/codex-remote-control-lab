@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { Icon } from "./Icon.jsx";
 import { MessageRow, messageText } from "./MessageRow.jsx";
 import { useStoreSelector } from "./store.jsx";
@@ -164,7 +164,19 @@ export function MessageList({ onLongPress, searchQuery, onCount, onScrollToggle 
 
 function RunState() {
   const run = useStoreSelector((s) => s.run);
-  const suffix = run.durationMs ? ` · ${(run.durationMs / 1000).toFixed(1)}s` : "";
+  // Live elapsed seconds while a turn is attached to this run; the honest
+  // "still running" signal — never a fake percentage or step count.
+  const [, forceTick] = useReducer((c) => c + 1, 0);
+  useEffect(() => {
+    if (!run?.startedAt) return undefined;
+    const timer = setInterval(forceTick, 1000);
+    return () => clearInterval(timer);
+  }, [run?.startedAt]);
+  const suffix = run.durationMs
+    ? ` · ${(run.durationMs / 1000).toFixed(1)}s`
+    : run.startedAt
+      ? ` · ${Math.max(0, Math.round((Date.now() - run.startedAt) / 1000))}s`
+      : "";
   return (
     <div id="runState" className="run-state" data-state={run.state} role="status" aria-live="polite">
       <span className="run-state-dot" aria-hidden="true" />

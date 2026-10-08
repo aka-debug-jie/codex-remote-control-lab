@@ -191,11 +191,23 @@ export function applyEvent(state, event) {
       return next;
     }
     case "run.state": {
-      next.run = { state: event.state || next.run.state, label: event.label || runStateText[event.state] || next.run.state, turnId: event.turnId ?? next.run.turnId };
+      const activeStates = ["running", "streaming", "submitted", "approval", "interrupting"];
+      const keepOrStart =
+        typeof next.run?.startedAt === "number"
+          ? next.run.startedAt
+          : activeStates.includes(event.state)
+            ? Date.now()
+            : null;
+      next.run = {
+        state: event.state || next.run.state,
+        label: event.label || runStateText[event.state] || next.run.state,
+        turnId: event.turnId ?? next.run.turnId,
+        startedAt: keepOrStart,
+      };
       return next;
     }
     case "run.started":
-      next.run = { state: "running", label: runStateText.running, turnId: event.turnId || null };
+      next.run = { state: "running", label: runStateText.running, turnId: event.turnId || null, startedAt: Date.now() };
       return next;
     case "run.finished": {
       const interrupted = event.status === "interrupted";
