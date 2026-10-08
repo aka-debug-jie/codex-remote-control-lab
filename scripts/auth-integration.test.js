@@ -97,6 +97,19 @@ test("POST /api/auth issues an HttpOnly session cookie for the right token", asy
   assert.match(cookie, /codex_session=/);
   assert.match(cookie, /HttpOnly/);
   assert.match(cookie, /SameSite=Strict/);
+  // The integration bridge serves plain HTTP (as the phone does over
+  // Tailscale LAN): WebView rejects Secure cookies on insecure origins, so
+  // the attribute must NOT be present here.
+  assert.doesNotMatch(cookie, /Secure/);
+
+  // Simulating a proxy terminates TLS: keep Secure then.
+  const httpsLike = await request(bridge.port, {
+    path: "/api/auth",
+    method: "POST",
+    headers: { "content-type": "application/json", "x-codex-client": "1", "x-forwarded-proto": "https" },
+    body: JSON.stringify({ token: TOKEN }),
+  });
+  assert.match(httpsLike.headers["set-cookie"][0], /Secure/);
 });
 
 test("authed endpoints accept the session cookie and reject tokenless requests", async (t) => {

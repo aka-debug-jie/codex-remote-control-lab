@@ -58,10 +58,21 @@ function parseCookies(header) {
   return out;
 }
 
+// Per-request Secure decision: browsers and WebViews REJECT Secure cookies on
+// plain-HTTP origins, which is how the phone reaches the bridge over Tailscale
+// LAN. HTTPS (e.g. behind a proxy) keeps the Secure attribute.
+function requestUsesHttps(req) {
+  const forwarded = req.headers && req.headers["x-forwarded-proto"];
+  if (forwarded) return String(forwarded).split(",")[0].trim() === "https";
+  return false;
+}
+
 function createSessionAuth({ token, persistedPath, secure = true, maxAge = DEFAULT_MAX_AGE } = {}) {
   const sessionValue = loadOrCreateSessionValue(persistedPath);
 
-  function setCookieHeader() {
+  function setCookieHeader({ secure: perRequest } = {}) {
+    // Default (HTTPS) may be overridden at set time by the transport reality.
+    const useSecure = perRequest === undefined ? secure : perRequest;
     const attrs = [
       `${COOKIE_NAME}=${encodeURIComponent(sessionValue)}`,
       "Path=/",
@@ -69,13 +80,14 @@ function createSessionAuth({ token, persistedPath, secure = true, maxAge = DEFAU
       "SameSite=Strict",
       `Max-Age=${maxAge}`,
     ];
-    if (secure) attrs.push("Secure");
+    if (useSecure) attrs.push("Secure");
     return attrs.join("; ");
   }
 
-  function clearCookieHeader() {
+  function clearCookieHeader({ secure: perRequest } = {}) {
+    const useSecure = perRequest === undefined ? secure : perRequest;
     const attrs = [`${COOKIE_NAME}=`, "Path=/", "HttpOnly", "SameSite=Strict", "Max-Age=0"];
-    if (secure) attrs.push("Secure");
+    if (useSecure) attrs.push("Secure");
     return attrs.join("; ");
   }
 
@@ -95,4 +107,4 @@ function createSessionAuth({ token, persistedPath, secure = true, maxAge = DEFAU
   };
 }
 
-module.exports = { createSessionAuth, parseCookies, COOKIE_NAME };
+module.exports = { createSessionAuth, parseCookies, COOKIE_NAME, requestUsesHttps };

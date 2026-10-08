@@ -4,7 +4,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const { createSessionAuth, parseCookies, COOKIE_NAME } = require("./session-auth");
+const { createSessionAuth, parseCookies, COOKIE_NAME, requestUsesHttps } = require("./session-auth");
 
 function tempFile() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-session-"));
@@ -60,6 +60,31 @@ test("session value persists across instances (survives restart)", () => {
 test("secure flag can be disabled for plain-http device testing", () => {
   const auth = createSessionAuth({ token: "t", persistedPath: tempFile(), secure: false });
   assert.doesNotMatch(auth.setCookieHeader(), /Secure/);
+});
+
+test("Secure is per-request: HTTPS keeps it, plain HTTP (phone) drops it", () => {
+  const auth = createSessionAuth({ token: "t", persistedPath: tempFile() });
+  // Default instance stays HTTPS-strict.
+  assert.match(auth.setCookieHeader(), /Secure/);
+  // Bridge is plain HTTP (Tailscale LAN http://100.x:45214) -> no Secure, so
+  // WebView actually stores the cookie instead of rejecting it.
+  assert.doesNotMatch(
+    auth.setCookieHeader({ secure: false }),
+    /Secure/,
+    "plain HTTP request must not carry Secure",
+  );
+  // Proxied HTTPS keeps Secure.
+  assert.match(
+    auth.setCookieHeader({ secure: true }),
+    /Secure/,
+  );
+});
+
+test("requestUsesHttps honors x-forwarded-proto only", () => {
+  assert.equal(requestUsesHttps({ headers: { "x-forwarded-proto": "https" } }), true);
+  assert.equal(requestUsesHttps({ headers: { "x-forwarded-proto": "http,https" } }), false);
+  assert.equal(requestUsesHttps({ headers: {} }), false);
+  assert.equal(requestUsesHttps({}), false);
 });
 
 test("clearCookieHeader zeroes the cookie", () => {

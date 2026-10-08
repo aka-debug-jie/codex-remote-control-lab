@@ -152,7 +152,7 @@ async function refreshWorkspaceMeta() {
 
 const { makeStaticServer } = require("./static-serve");
 const { pickEncoding, compress } = require("./http-compress");
-const { createSessionAuth } = require("./session-auth");
+const { createSessionAuth, requestUsesHttps } = require("./session-auth");
 const serveStatic = makeStaticServer({ publicRoot: path.join(root, "public") });
 
 // Only compress JSON above this size; the upper bound keeps the synchronous
@@ -2560,7 +2560,7 @@ async function main() {
         return;
       }
       if (req.method === "DELETE") {
-        res.setHeader("Set-Cookie", sessionAuth.clearCookieHeader());
+        res.setHeader("Set-Cookie", sessionAuth.clearCookieHeader({ secure: requestUsesHttps(req) }));
         sendJson(req, res, 200, { ok: true });
         return;
       }
@@ -2574,7 +2574,7 @@ async function main() {
         sendJson(req, res, 401, { error: "invalid token" });
         return;
       }
-      res.setHeader("Set-Cookie", sessionAuth.setCookieHeader());
+      res.setHeader("Set-Cookie", sessionAuth.setCookieHeader({ secure: requestUsesHttps(req) }));
       sendJson(req, res, 200, { ok: true, tokenRequired: true });
       return;
     }
