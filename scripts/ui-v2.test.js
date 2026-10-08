@@ -54,6 +54,10 @@ async function mockApi(page, state = {}) {
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     const respond = (json) => route.fulfill({ json });
+    // Optional per-path response latency: lets contract tests reproduce
+    // "slow earlier response arrives after a newer one" races.
+    const delay = state.delays?.[url.pathname];
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
     if (url.pathname === "/api/auth") return route.fulfill({ status: 200, json: { ok: true, tokenRequired: true } });
     if (url.pathname === "/api/info") return respond({ tokenRequired: true, authMode: "token" });
     if (url.pathname === "/api/artifacts") return respond({ data: state.artifacts || [], artifacts: state.artifacts || [] });
@@ -263,6 +267,50 @@ test("panels sheet tabs switch titles and theme selection keeps the sheet open",
   await options.nth(2).click();
   await page.waitForTimeout(200);
   assert.ok(await page.locator(".bottom-sheet.open").isVisible());
+});
+
+test("a slow earlier panel response never overwrites the newer panel", async (t) => {
+  const { page } = await boot(t, {
+    apiState: {
+      delays: { "/api/workspace": 700 },
+      workspace: [{ path: "slow.md", name: "slow.md", kind: "markdown" }],
+      review: { branch: "main", clean: false, source: "working tree", files: [], stat: [], totals: { additions: 0, deletions: 0 } },
+    },
+  });
+  await page.click("#menuButton");
+  await page.waitForSelector(".bottom-sheet.open");
+  // Start the slow workspace request…
+  await page.click("#workspaceTab");
+  // …then switch to a fast panel and let the slow response land afterwards.
+  await page.click("#reviewTab");
+  await page.waitForTimeout(400);
+  assert.match(await page.locator("#artifactTitle").innerText(), /审查/);
+  // Even after the slow workspace response finally arrives, the review panel
+  // must remain authoritative.
+  await page.waitForTimeout(800);
+  assert.match(await page.locator("#artifactTitle").innerText(), /审查/);
+  assert.ok(await page.locator('.list-row:has-text("slow.md")').count() === 0, "stale workspace rows must not surface");
+  // Re-selecting the tab refetches it and shows the real data.
+  await page.click("#workspaceTab");
+  await page.locator('.list-row:has-text("slow.md")').waitFor({ timeout: 4000 });
+});
+
+test("fast Diff then slow Files: the latest view wins", async (t) => {
+  const { page } = await boot(t, {
+    apiState: {
+      delays: { "/api/workspace": 600 },
+      workspace: [{ path: "late.md", name: "late.md", kind: "markdown" }],
+      review: { branch: "main", clean: true, source: "latest commit", files: [], stat: [], totals: {} },
+    },
+  });
+  await page.click("#menuButton");
+  await page.waitForSelector(".bottom-sheet.open");
+  await page.click("#reviewTab");
+  await page.waitForSelector('.list-row:has-text("来源")');
+  await page.click("#workspaceTab");
+  await page.click("#reviewTab");
+  await page.waitForTimeout(900);
+  assert.match(await page.locator("#artifactTitle").innerText(), /审查/);
 });
 
 test("access button cycles sandbox modes", async (t) => {

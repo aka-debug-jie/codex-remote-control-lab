@@ -117,8 +117,10 @@ export function isCookieReady() {
   return cookieReady;
 }
 
-export async function apiGet(path) {
-  const response = await fetch(withToken(path), { credentials: "same-origin", cache: "no-store" });
+export async function apiGet(path, { signal } = {}) {
+  // Callers cancel via AbortSignal; the token is never attached to foreign
+  // origins and stale responses are discarded by the request-generation layer.
+  const response = await fetch(withToken(path), { credentials: "same-origin", cache: "no-store", signal });
   const text = await response.text();
   let data;
   try {
@@ -131,6 +133,10 @@ export async function apiGet(path) {
     throw new Error(message);
   }
   return data;
+}
+
+export function isAbortError(error) {
+  return Boolean(error) && (error.name === "AbortError" || error.code === 20);
 }
 
 // Unify the file-preview shape so the UI never has to know about backend field
@@ -150,21 +156,22 @@ export function normalizeFilePreview(raw) {
 
 export const api = {
   auth: () => authenticate(),
-  info: () => apiGet("/api/info"),
-  status: (refreshRateLimits = false) => apiGet(`/api/status${refreshRateLimits ? "?refreshRateLimits=1" : ""}`),
-  threads: (provider) => apiGet(`/api/threads?provider=${encodeURIComponent(provider)}`),
-  thread: (threadId, provider, sinceRev) =>
+  info: (opts) => apiGet("/api/info", opts),
+  status: (refreshRateLimits = false, opts) => apiGet(`/api/status${refreshRateLimits ? "?refreshRateLimits=1" : ""}`, opts),
+  threads: (provider, opts) => apiGet(`/api/threads?provider=${encodeURIComponent(provider)}`, opts),
+  thread: (threadId, provider, sinceRev, opts) =>
     apiGet(
       `/api/thread?thread=${encodeURIComponent(threadId)}&provider=${encodeURIComponent(provider)}` +
         (sinceRev ? `&sinceRev=${encodeURIComponent(sinceRev)}` : ""),
+      opts,
     ),
-  skills: () => apiGet("/api/skills"),
-  plugins: () => apiGet("/api/plugins"),
-  automations: () => apiGet("/api/automations"),
-  config: () => apiGet("/api/config"),
-  models: () => apiGet("/api/models"),
-  review: () => apiGet("/api/review"),
-  workspace: (limit = 180) => apiGet(`/api/workspace?limit=${limit}`),
-  artifacts: () => apiGet("/api/artifacts"),
-  file: (path) => apiGet(`/api/file?path=${encodeURIComponent(path)}`).then(normalizeFilePreview),
+  skills: (opts) => apiGet("/api/skills", opts),
+  plugins: (opts) => apiGet("/api/plugins", opts),
+  automations: (opts) => apiGet("/api/automations", opts),
+  config: (opts) => apiGet("/api/config", opts),
+  models: (opts) => apiGet("/api/models", opts),
+  review: (opts) => apiGet("/api/review", opts),
+  workspace: (limit = 180, opts) => apiGet(`/api/workspace?limit=${limit}`, opts),
+  artifacts: (opts) => apiGet("/api/artifacts", opts),
+  file: (path, opts) => apiGet(`/api/file?path=${encodeURIComponent(path)}`, opts).then(normalizeFilePreview),
 };
