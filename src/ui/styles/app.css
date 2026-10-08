@@ -991,6 +991,12 @@ button.secondary {
   flex-direction: column;
   gap: var(--sp-2);
   padding: 0 var(--sp-2) calc(env(safe-area-inset-bottom) + var(--sp-2));
+  /* Soft-keyboard avoidance: --keyboard-inset is computed from the
+     visualViewport (App.jsx). max() wins over the fallback line, while older
+     engines keep the safe-area-only padding above. */
+  padding-bottom: calc(
+    max(env(safe-area-inset-bottom), var(--keyboard-inset, 0px)) + var(--sp-2)
+  );
   pointer-events: none;
 }
 .composer-stack > * {

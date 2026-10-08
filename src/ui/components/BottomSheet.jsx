@@ -7,6 +7,13 @@ export function BottomSheet({ open, onClose, title, children, labelledBy }) {
   const dragRef = useRef(null);
   const [dragY, setDragY] = useState(0);
 
+  // While closed the sheet stays mounted for animations, but must leave the
+  // a11y tree and focus order: inert blocks both (React 18 has no inert prop).
+  useEffect(() => {
+    const sheet = sheetRef.current;
+    if (sheet) sheet.toggleAttribute("inert", !open);
+  }, [open]);
+
   useEffect(() => {
     if (!open) {
       setDragY(0);

@@ -21,6 +21,14 @@ function titleForThread(thread) {
 export function ThreadDrawer({ open, onOpen, onClose, threads, selectedThread, search, onSearch, onSelect, onNew, onTool }) {
   const [dragX, setDragX] = useState(0);
   const dragRef = useRef(null);
+  const drawerRef = useRef(null);
+
+  // Keep the closed drawer out of the a11y tree and Tab order (aria-hidden
+  // alone leaves its buttons focusable).
+  useEffect(() => {
+    const drawer = drawerRef.current;
+    if (drawer) drawer.toggleAttribute("inert", !open);
+  }, [open]);
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -88,6 +96,7 @@ export function ThreadDrawer({ open, onOpen, onClose, threads, selectedThread, s
     <>
       <div className={`drawer-scrim${open ? " open" : ""}`} id="sidebarScrim" aria-hidden="true" onClick={onClose} />
       <aside
+        ref={drawerRef}
         className={`drawer glass-edge${open ? " open" : ""}`}
         id="threadSidebar"
         aria-label="会话"

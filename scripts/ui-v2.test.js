@@ -432,6 +432,45 @@ test("prompt modal applies text back to the composer", async (t) => {
   assert.equal(await page.inputValue("#prompt"), "放大后的内容");
 });
 
+test("prompt modal close and Escape cancel without applying; only 应用 commits", async (t) => {
+  const { page } = await boot(t);
+  await page.fill("#prompt", "原草稿");
+  await page.click("#expandPromptButton");
+  await page.waitForTimeout(200);
+  await page.fill("#promptModalInput", "中途改动");
+  // ✕ header button is 取消 semantics: composer draft must survive untouched.
+  await page.click("#closePromptModalButton");
+  await page.waitForTimeout(200);
+  assert.equal(await page.inputValue("#prompt"), "原草稿", "close must NOT apply");
+  // Escape likewise cancels.
+  await page.click("#expandPromptButton");
+  await page.waitForTimeout(200);
+  await page.fill("#promptModalInput", "另一处改动");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  assert.equal(await page.inputValue("#prompt"), "原草稿", "Escape must NOT apply");
+  // Explicit 应用 commits the edited draft.
+  await page.click("#expandPromptButton");
+  await page.waitForTimeout(200);
+  await page.fill("#promptModalInput", "中途改动");
+  await page.click("#applyPromptModalButton");
+  await page.waitForTimeout(200);
+  assert.equal(await page.inputValue("#prompt"), "中途改动");
+});
+
+test("fullscreen prompt dialog traps Tab focus", async (t) => {
+  const { page } = await boot(t);
+  await page.click("#expandPromptButton");
+  await page.waitForTimeout(200);
+  const inside = await page.evaluate(() => document.querySelector("#promptModal").contains(document.activeElement));
+  assert.ok(inside, "initial focus lands inside the dialog");
+  // Shift+Tab from the first focusable wraps to the LAST control inside.
+  await page.keyboard.press("Shift+Tab");
+  await page.waitForTimeout(50);
+  const stillInside = await page.evaluate(() => document.querySelector("#promptModal").contains(document.activeElement));
+  assert.ok(stillInside, "Tab cannot escape the dialog");
+});
+
 test("slash menu lists skills and inserts a command", async (t) => {
   const { page } = await boot(t, {
     apiState: { skills: [{ id: "s1", name: "demo", trigger: "/demo", description: "demo skill" }] },
