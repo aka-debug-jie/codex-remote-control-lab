@@ -174,6 +174,16 @@ export function applyEvent(state, event) {
       if (event.run) next.run = event.run;
       return next;
     }
+    case "messages.clear": {
+      // Thread switching: stale content of the previous conversation must not
+      // stay on screen if the next snapshot is slow (or never arrives).
+      next.messages = [];
+      next.activeAssistantId = null;
+      next.approvals = [];
+      next.usage = null;
+      next.run = { state: "connecting", label: "切换会话…", turnId: null, startedAt: null };
+      return next;
+    }
     case "messages.restore": {
       // Cached renderable messages (already in {role, parts} form).
       next.messages = (event.messages || []).map((m) => ({ ...m, parts: (m.parts || []).map((p) => ({ ...p })) }));

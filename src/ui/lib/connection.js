@@ -258,6 +258,8 @@ export function createConnection(store, { onThreadChange } = {}) {
       /* ignore */
     }
     ws = null;
+    // Switching conversations must visibly leave the old one immediately.
+    store.dispatch({ type: "messages.clear" });
     store.dispatch({ type: "command.clear" });
     if (onThreadChange) onThreadChange(nextThreadId);
     connect(nextThreadId);

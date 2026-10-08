@@ -779,6 +779,41 @@ test("queues a send while disconnected and flushes it on reconnect", async (t) =
   );
 });
 
+test("thread switch clears the old conversation immediately and shows the new thread", async (t) => {
+  const readyFor = (id, userText) => ({
+    type: "ready",
+    threadId: id,
+    model: "gpt-6.1-sol",
+    clients: 1,
+    workdir: root,
+    run: { state: "ready", label: "空闲" },
+    history: [{ type: "user", text: userText }],
+  });
+  const { page } = await boot(t, {
+    thread: "ta",
+    apiState: {
+      threads: [
+        { id: "ta", name: "Thread A", updatedAt: Date.now() },
+        { id: "tb", name: "Thread B", updatedAt: Date.now() },
+      ],
+    },
+    ws: {
+      readyPayloadByThread: {
+        ta: readyFor("ta", "A 会话的第一条消息"),
+        tb: readyFor("tb", "B 会话的全新的消息"),
+      },
+    },
+  });
+  await page.waitForFunction(() => document.querySelector("#runState")?.dataset.state === "ready");
+  await page.getByText("A 会话的第一条消息").waitFor({ timeout: 4000 });
+  // Switch to thread B: the user-reported bug — old content MUST leave at once.
+  await page.click("#mobileThreads");
+  await page.waitForSelector(".drawer.open");
+  await page.locator('.thread-item:has-text("Thread B")').click();
+  await page.getByText("B 会话的全新的消息").waitFor({ timeout: 8000 });
+  assert.equal(await page.locator('.entry:has-text("A 会话的第一条消息")').count(), 0, "old thread content must not linger");
+});
+
 test("composer draft is scoped per thread and survives a switch", async (t) => {
   const readyFor = (id) => ({
     type: "ready",
