@@ -78,9 +78,19 @@ function upsertCommand(commands, commandId, patch) {
   if (index < 0) {
     return [...commands, { commandId, status: "queued", createdAt: Date.now(), ...patch }];
   }
+  // A command already linked to its authoritative user echo must never be
+  // resurrected by later bookkeeping frames (accepted/dispatched/sent all race
+  // behind the echo on real devices).
+  if (commands[index].status === "linked") return commands;
   const next = commands.slice();
   next[index] = { ...next[index], ...patch };
   return next;
+}
+
+// The server's user message is the authoritative echo of a command: mark it
+// linked instead of deleting, so later frames cannot resurrect the pending chip.
+function markCommandLinked(commands, commandId) {
+  return upsertCommand(commands, commandId, { status: "linked" });
 }
 
 function removeCommand(commands, commandId) {
@@ -240,8 +250,9 @@ export function applyEvent(state, event) {
       });
       if (role === "assistant") next.activeAssistantId = event.messageId;
       // A user message carrying a commandId is the authoritative echo of a
-      // pending command: drop the optimistic bubble so it is never shown twice.
-      if (role === "user" && event.commandId) next.commands = removeCommand(next.commands, event.commandId);
+      // pending command: link it so the optimistic bubble disappears and later
+      // bookkeeping cannot resurrect the chip.
+      if (role === "user" && event.commandId) next.commands = markCommandLinked(next.commands, event.commandId);
       return next;
     }
     case "message.delta": {
