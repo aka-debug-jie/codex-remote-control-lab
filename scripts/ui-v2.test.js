@@ -851,12 +851,32 @@ test("send is disabled until the bridge reports ready", async (t) => {
 });
 
 test("renders cached messages before the socket delivers a snapshot", async (t) => {
-  const cached = [{ id: "hist:0", role: "user", status: "done", parts: [{ type: "text", text: "缓存的离线消息" }] }];
+  const cached = {
+    schemaVersion: 2,
+    threadId: "thread-v2",
+    savedAt: Date.now(),
+    truncated: false,
+    messages: [{ id: "hist:0", role: "user", status: "done", parts: [{ type: "text", text: "缓存的离线消息" }] }],
+  };
   const { page } = await boot(t, {
     thread: "thread-v2",
     ws: { readyDelay: 5000, seedCache: { "codexPhoneCache:thread-v2": JSON.stringify(cached) } },
   });
   await page.getByText("缓存的离线消息").first().waitFor({ timeout: 3000 });
+});
+
+test("legacy-shape cache entries are ignored, not rendered", async (t) => {
+  const legacy = [{ id: "hist:0", role: "user", status: "done", parts: [{ type: "text", text: "旧格式缓存" }] }];
+  const { page } = await boot(t, {
+    thread: "thread-v2",
+    ws: { readyDelay: 4000, seedCache: { "codexPhoneCache:thread-v2": JSON.stringify(legacy) } },
+  });
+  // The stale entry must not surface as if it were the conversation, and the
+  // reader purges it so it never renders on a later cold start either.
+  await page.waitForFunction(() => {
+    const raw = localStorage.getItem("codexPhoneCache:thread-v2");
+    return !raw || JSON.parse(raw).schemaVersion === 2;
+  }, null, { timeout: 8000 });
 });
 
 test("in-thread search filters messages and shows a count", async (t) => {

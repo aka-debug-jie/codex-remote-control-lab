@@ -231,8 +231,9 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const cached = loadCachedMessages(initialThread);
-    if (cached && cached.length) {
+    const cachedEntry = loadCachedMessages(initialThread);
+    const cached = cachedEntry?.messages || [];
+    if (cached.length) {
       store.dispatch({ type: "messages.restore", threadId: initialThread, messages: cached });
     }
     // Exchange the URL token for a session cookie before opening the socket, so

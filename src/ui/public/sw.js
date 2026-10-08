@@ -60,12 +60,27 @@ self.addEventListener('fetch', (e) => {
           fetch(req).then((resp) => {
             if (resp.status === 404) {
               // Stale shell referenced an asset removed by a new deployment:
-              // drop the cache and reload clients so they pick up the new shell.
-              caches
-                .delete(CACHE)
-                .then(() => self.clients.matchAll({ type: 'window' }))
-                .then((clients) => clients.forEach((client) => client.navigate(client.url)))
-                .catch(() => {});
+              // drop the cache and reload clients so they pick up the new
+              // shell — but cap hard reloads so a broken environment can't
+              // loop forever (the user keeps their drafts either way once a
+              // cached shell exists).
+              const MAX_RECOVERIES = 3;
+              const key = 'codexSw404Recoveries';
+              const attempts = Number(sessionStorage.getItem(key) || 0);
+              if (attempts < MAX_RECOVERIES) {
+                try { sessionStorage.setItem(key, String(attempts + 1)); } catch (err) { /* ignore */ }
+                caches
+                  .delete(CACHE)
+                  .then(() => self.clients.matchAll({ type: 'window' }))
+                  .then((clients) => clients.forEach((client) => client.navigate(client.url)))
+                  .catch(() => {});
+              } else {
+                self.clients.matchAll({ type: 'window' }).then((clients) =>
+                  clients.forEach((client) =>
+                    client.postMessage({ type: 'codex-shell-recovery-failed', attempts })
+                  )
+                );
+              }
               return Response.error();
             }
             return putInCache(req, resp);
