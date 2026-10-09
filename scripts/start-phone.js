@@ -111,7 +111,15 @@ const uploadDir = path.join(root, ".uploads");
 // Grace window between the last client leaving and bridge disposal: an app
 // switch / screen lock survives it, and a running task survives even beyond it
 // (disposal re-arms while busy). 0 restores the legacy kill-on-disconnect.
-const detachGraceMs = positiveNumber(process.env.PHONE_DETACH_GRACE_MS, 120 * 1000);
+// Explicit env value wins, including 0 (which disables the grace entirely);
+// only an unset/NaN value falls back to the default. positiveNumber() treats
+// 0 as invalid, so the parse must accept 0 explicitly here.
+const detachGraceMs = (() => {
+  const raw = process.env.PHONE_DETACH_GRACE_MS;
+  if (raw === undefined || raw === "") return 120 * 1000;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : 120 * 1000;
+})();
 const bridges = new Map();
 let notificationBridgeUrls = [];
 const historyLimit = 80;

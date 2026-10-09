@@ -109,6 +109,15 @@ export function PanelsSheet({
     }
   }, []);
 
+  // Unified close: aborting the in-flight preview request invalidates its
+  // generation, so a late response can no longer re-open the preview after
+  // the user dismissed it ("关闭 diff 后可能重新弹出" fix). Used by every
+  // preview render path.
+  const closePreview = useCallback(() => {
+    if (fileAbortRef.current) fileAbortRef.current.abort();
+    setPreview(null);
+  }, []);
+
   useEffect(() => {
     if (!open) return;
     if (toolView === "settings") return; // rendered from themeOptions directly
@@ -351,7 +360,7 @@ export function PanelsSheet({
                         Diff
                       </button>
                     ) : null}
-                    <button type="button" className="text-btn" onClick={() => setPreview(null)}>关闭</button>
+                    <button type="button" className="text-btn" onClick={closePreview}>关闭</button>
                   </span>
                 </div>
                 {preview.kind === "diff" ? (
